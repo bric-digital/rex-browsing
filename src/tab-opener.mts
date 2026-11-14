@@ -12,10 +12,10 @@
  * `pendingUrl` is present only for middle and modifier clicks, so the new tab's
  * first navigation is read from `tabs.onUpdated` instead, which carries the
  * committed URL on every method. In a redirect chain that URL is the landing
- * page, never the hop, so the chain's root is resolved at drain time from the
- * hops this module already holds.
+ * page, never the redirect step, so the chain's root is resolved at drain time from the
+ * visits this module already holds.
  *
- * An opener edge is stored under its own key prefix, so a hop and an opener
+ * An opener edge is stored under its own key prefix, so a visit and an opener
  * edge for the same visit can both be held.
  */
 

@@ -6,7 +6,7 @@
  * records disappear and the module looks like it never fired. Distinct keys
  * cannot collide, so there is nothing to serialise.
  *
- * Each kind of edge gets its own key prefix, so a hop and an opener edge for
+ * Each kind of edge gets its own key prefix, so a visit and an opener edge for
  * the same visit can both be held.
  */
 

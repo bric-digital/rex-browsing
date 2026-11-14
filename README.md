@@ -1,302 +1,142 @@
-# rex-visit-graph
+# rex-browsing
 
-REX module that records the browser's visit graph, including the visits `chrome.history.search()` omits, so referral chains resolve.
+REX module that records every http and https visit after install, in the same structure as a `rex-history-visit`, so browsing before and after the install date lines up in one analysis.
 
-**Current release: `v2.0.0`.** Pin it:
-
-```json
-"@bric/rex-visit-graph": "github:bric-digital/rex-visit-graph#v2.0.0"
-```
-
-`package.json` on `main` carries a `-dev` version between releases (`1.1.1-dev` means past 1.1.0, not yet 1.1.1), so the repo never names a release that was not cut. Releases and what the numbers mean: [RELEASING.md](RELEASING.md). 
-
-If your study needs to document which pages referred the browser to a target page, you may need this module. 
-
-## Overview
-
-Chrome stores redirect intermediates but keeps them out of history search results. A collector that enumerates with `chrome.history.search()` therefore never sees them, while the landing page it does collect still points at one through `referringVisitId`. That id belongs to no exported row, so the chain from a click back to the search that produced it terminates, and the visit cannot be attributed to the search.
-
-`chrome.history.onVisited` does fire for those visits, which is the only way to learn they happened. **rex-visit-graph** listens and emits their ids. It:
-
-- Watches every visit the browser reports and captures the whole graph by default
-- Resolves each one's visit id and referring visit id via `chrome.history.getVisits()`
-- Emits them as `rex-visit-graph-hop` points on its own schedule
-- Sends ids plus each address's origin and path by default, dropping the query string, and depends on no other module
-
-**Capture rules narrow, they do not enable.** With none configured every visit on a configured scheme is captured; `schemes` decides which those are. A study that wants less states rules to reduce it. That way a redirector nobody has seen yet is captured anyway, instead of going silently uncollected until somebody notices the data is missing — which is the failure this module exists to end.
-
-Analysis joins on `visit_id`: the landing page's `referring_visit_id` resolves to a held row, and that row's own referrer reaches the search page with its query intact.
-
-Measured against Google on 2026-09-01: twelve organic results across four queries all routed through `google.com/goto`, and none of the twelve click-throughs could be tied back to its search in the uploaded data. A Google ad click routed through `google.com/aclk` with the same result.
-
-## How it works
-
-Small files, each with one job.
-
-| File | Responsibility |
-|------|----------------|
-| `capture-rules.mts` | Decides whether a visited URL is one we want. Pure logic, no Chrome APIs. |
-| `history-visibility.mts` | Asks whether rex-history's collector can already see a visit. |
-| `deferred-visits.mts` | Holds the visits whose visibility could not be decided yet. |
-| `visit-lookup.mts` | Turns a URL into its visit ids via `chrome.history.getVisits()`. |
-| `edge-store.mts` | One key per record in `chrome.storage.local`, under a prefix per kind of edge. |
-| `hop-store.mts` | Holds captured hops until they can be emitted. |
-| `tab-opener.mts` | Attributes a new tab's first visit to the page that opened it, from `chrome.tabs`. |
-| `internal-pages.mts` | Records the browser's own pages, which Chrome keeps out of history, from `chrome.tabs`. |
-| `service-worker.mts` | The REX module itself: listeners, configuration, drain, message handling. |
-
-### The path a hop takes
-
-1. **A visit happens.** `chrome.history.onVisited` fires for *every* visit, including the redirect intermediates `search()` hides. The listener is registered at module scope (see Design notes) and does nothing but hand the item to the module.
-2. **Is it interesting?** `CaptureRules.match()` compares the URL against the configured rules. Host must match exactly or be a true subdomain; path must start with the prefix. No match, nothing happens — the overwhelmingly common case.
-3. **Can history already see it?** At the default `capture_scope: 'hops'`, `collectorCanSee()` probes `chrome.history.search()` over a narrow window around the visit. A visit it returns is one rex-history collects with these same ids, so capturing it would duplicate a row we already send.
-4. **If it can, ask again after the next visit.** A client-side redirector — `location.replace`, a meta refresh — is a real document, so it is an ordinary visit that `search()` returns until the moment it redirects, and Chrome hides it only once it has. Deciding on that first answer drops it from every export. So a visit that looks visible is held in memory by `DeferredVisits` and re-probed when the next visit arrives, which for a redirect is its own landing page, milliseconds later. Whatever is still held is settled at drain.
-5. **Resolve its ids.** The `HistoryItem` `onVisited` provides carries *no* visit id and no referrer, so `VisitLookup.newestVisit()` calls `chrome.history.getVisits({url})` and takes the newest visit. This is the step that yields `visitId` and `referringVisitId`.
-6. **Store it.** `HopStore.record()` writes one record under `rexVisitGraphHop:<visitId>`. Nothing is emitted yet: points must not be dispatched before configuration exists, and the visit may have happened before configuration loaded.
-7. **Drain**, when the host sends `triggerVisitGraphDrain`: sweep anything past `max_hop_age_days`, dispatch one `rex-visit-graph-hop` point per remaining record, then delete them. Any address kept under `url_detail` is redacted first.
-8. **Analysis joins.** The landing page's `referring_visit_id` now names a row that exists, and that row's own referrer reaches the SERP.
-
-### Why capture and emission are separated
-
-They answer to different constraints, and collapsing them would break one or the other.
-
-**Capture cannot wait.** `onVisited` is the only way to learn a redirect intermediate's URL, and it fires once. A hop missed because configuration had not loaded is unrecoverable. So the listener runs from the first turn of the worker script with the default rules already seeded.
-
-**Emission must wait.** Points may not be dispatched before configuration is available, and a disabled module must emit nothing at all. So the decision to send is deferred to drain time, where the configuration is known.
-
-The store between them is what lets both be true.
-
-## Configuration
-
-This module reads from the `visit_graph` section of the backend config. Every field has a default, so the module works before the server knows about it — a study needs no `visit_graph` block at all unless it wants to narrow capture, emit URLs, or turn the module off.
-
-The module also declares this shape in code, via `configurationDetails()` in `src/service-worker.mts`. A test asserts that declaration covers every setting the module actually reads, so it cannot fall behind the code the way a README can. Nothing in rex-core consumes `configurationDetails()` today — it is a self-description convention, and this is the copy to trust if the table below ever disagrees with it.
-
-### Schema
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `enabled` | boolean | No | `true` | Enable/disable the module; see below |
-| `capture_rules` | array | No | `[]` (capture everything) | Optional narrowing filter; see below |
-| `schemes` | array | No | `["http", "https"]` | Schemes to capture, without the colon, matched case-insensitively. Name others (`file`, `ftp`, `webdav`) to opt into them. `chrome`, `chrome-untrusted` and `edge` record internal pages; see below |
-| `url_detail` | string | No | `"path"` | `"none"`, `"path"` or `"full"`; how much of the address to keep. See below |
-| `tab_opener_edges` | boolean | No | `true` | Attribute a new tab's first visit to the page that opened it, as `rex-visit-graph-opener` points. Needs the `tabs` permission in the host |
-| `max_opener_visits` | number | No | `25000` | Ceiling on an opener page's visit count. Above it the page is not looked up, so tabs it opens get no opener edge. `getVisits()` cannot be bounded and costs ~1s on a page that re-records a visit every few seconds, charged per new tab. `0` removes the ceiling |
-| `debug` | boolean | No | `false` | Forces `url_detail` to `"full"` in any build, for diagnosing a deployment |
-| `redaction` | object | No | - | `allow_lists`, `filter_lists`, `domain_only_lists`; used only when rex-history states none |
-| `max_hop_age_days` | number | No | `7` | Age after which an un-emitted hop is discarded |
-
-Each entry in `capture_rules` is an object:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | Yes | Stable label emitted with each hop, so rules can be told apart |
-| `host_suffix` | string | Yes | Matches this host exactly or a true subdomain, case-insensitively, never a lookalike such as `notgoogle.com`. `*` matches any host |
-| `path_prefix` | string | Yes | Matches when the path starts with this string |
-
-Rules are a narrowing filter and are server-side because a study's appetite changes without a Web Store release. Leaving them empty is the safe choice: it cannot miss a redirector. Stating them reduces volume at the cost of only capturing what you named — and the paths do change, so a rule list is a maintenance commitment. `/goto` and `/aclk` were both observed on Google within one day.
-
-### Address detail
-
-`url_detail` decides how much of a captured address the module keeps. Whatever it keeps is what it stores: the module never holds more of an address than it is configured to emit.
-
-| Value | Kept and emitted | Answers |
-|-------|------------------|---------|
-| `"none"` | nothing; the address is discarded once the visit ids are resolved | where the path went, via the join to rex-history |
-| `"path"` (default) | origin and pathname, no query | **what the intermediate was** — `google.com/goto` versus `google.com/aclk`, an organic click versus an ad — without the destination a redirector encodes in its query |
-| `"full"` | the whole address | everything, including that encoded destination |
-
-`"path"` exists because ids alone cannot say what kind of transition a hop was. Under narrowed capture the `capture_rule` field answers that; capturing the whole graph, every hop is `all` and the character of the transition is lost. `"path"` restores it at a fraction of the cost of `"full"`.
-
-`debug: true` forces `"full"` in **any** build, because diagnosing a real deployment is exactly when full addresses are needed. It logs a warning while it is on, so a configuration left in that state is visible rather than silent.
-
-### Redaction, when an address is kept
-
-With ids alone there is nothing to redact, and with no lists stated anywhere an address passes unchanged, so the module needs no lists to run. Any address it does keep is redacted before it is emitted.
-
-**Settings resolve to rex-history's if it states any**, so a study that has already decided what may be recorded does not state it twice and the two modules cannot disagree. `visit_graph.redaction` applies only when rex-history states nothing, which is the case for a study running this module without rex-history.
-
-Rules and precedence match rex-history exactly, and the branches are exclusive:
-
-| Order | Condition | Recorded as |
-|-------|-----------|-------------|
-| 1 | matches a `domain_only_lists` entry | `DOMAIN ONLY` |
-| 2 | `allow_lists` configured and nothing matches | `CATEGORY:NOT_ON_ALLOWLIST` |
-| 3 | matches a `filter_lists` entry | `CATEGORY:<category>` |
-| 4 | otherwise | the URL, unchanged |
-
-List **contents** are not synced here. Matching reads whatever rex-lists holds in IndexedDB, populated by whichever module owns the sync. An empty database means a configured allow-list matches nothing and everything redacts, so the failure direction is closed rather than open.
-
-One caveat to weigh before enabling it: a Google hop's own host is `google.com`, so these rules ask whether Google is allowed, not whether the destination is. The `?url=…` blob encodes where the click went, so a destination that rex-history redacted can still be reconstructed from an emitted hop URL. Redacting the destination itself would mean decoding that blob, which is undocumented and changes without notice.
-
-### Example
+**Current release: none yet for rex-browsing.** The last release under the old name, rex-visit-graph, was `v2.0.0`. Once `v3.0.0` is cut, pin it:
 
 ```json
-{
-  "visit_graph": {
-    "enabled": true,
-    "capture_rules": [
-      { "id": "google-aclk", "host_suffix": "google.com", "path_prefix": "/aclk" },
-      { "id": "google-goto", "host_suffix": "google.com", "path_prefix": "/goto" },
-      { "id": "google-url", "host_suffix": "google.com", "path_prefix": "/url" }
-    ],
-    "schemes": ["http", "https"],
-    "url_detail": "path",
-    "debug": false,
-    "max_hop_age_days": 7
-  }
-}
+"@bric/rex-browsing": "github:bric-digital/rex-browsing#v3.0.0"
 ```
 
-## Emitted data
+`package.json` on `main` carries a `-dev` version between releases (`3.0.0-dev` means not yet 3.0.0), so the repo never names a release that was not cut. Releases and what the numbers mean: [RELEASING.md](RELEASING.md).
 
-One `rex-visit-graph-hop` point per captured visit:
+## Why
 
-```json
-{
-  "visit_id": "5",
-  "referring_visit_id": "4",
-  "visit_time": 1788218626270,
-  "capture_rule": "google-goto",
-  "date": 1788218626270,
-  "url": "https://www.google.com/goto"
-}
-```
+rex-history reads the browser's history, so it can only describe what happened before it ran. A study also needs what happens after install, as it happens, shaped the same way so a researcher does not reconcile two formats across the install date. rex-browsing is that live record.
 
-No title, and no query string: the hop says what kind of intermediate it was and that one visit led to another. `url` is absent under `url_detail: "none"`.
+Chrome also keeps redirect steps out of history search results, while the landing page still points at one through its referring visit id. `chrome.history.onVisited` fires for those steps, so recording from it means a landing page's `referring_visit_id` names a record that exists.
 
-### Opener edges: the new-tab and new-window break
+Studies opt in: the module is off until configuration enables it. It does no redaction yet; redaction belongs to rex-content-processing.
 
-**A new tab or window breaks the chain in a different way, and Chrome offers a different repair.** Chrome records no referring visit across a tab boundary, and a new window is a new tab in a new window: a middle click, a modifier click, a `target="_blank"` link, a `window.open()` or an "open in new window" produces `referring_visit_id: "0"`, not a dangling id. Measured on Chrome 152 across all six opening methods: the same-tab click linked correctly, every new-tab form did not, and `transition` read `link` throughout so it does not distinguish them either. For analysis this is worse than a redirect hop in one way: `"0"` is indistinguishable from a typed address or a bookmark, so a new-tab click looks like arrival from nowhere rather than like a break.
+## What it records
 
-The relationship exists only on `chrome.tabs`: the new tab's `openerTabId` names the tab it was opened from. When `tab_opener_edges` is on (the default), the module records which visit the opener tab was on when the tab was created, waits for the new tab's first committed URL, resolves that visit's id, and emits one `rex-visit-graph-opener` point:
+Every http and https visit Chrome reports. Nothing narrows or drops one. The module depends on no other REX module to record; rex-core supplies configuration and the participant identifier.
 
-```json
-{
-  "visit_id": "10",
-  "referring_visit_id": "9",
-  "visit_time": 1789096044324,
-  "capture_rule": "all",
-  "transition": "link",
-  "date": 1789096044324
-}
-```
+### `rex-browsing-visit`
 
-The fields mean what they mean on a hop, so the two point types union into one edge list: `visit_id` is the first visit in the new tab and `referring_visit_id` is the opener's visit. When the new tab's first navigation was itself a redirect chain, `visit_id` names the chain's **root** (the hop, whose Chrome referrer is `"0"`) rather than the landing page, so `landing -> hop -> opener` walks end to end; the root is found among the hops held at drain time, and if it is not among them the edge attaches to the first committed visit instead.
+Fields shared with `rex-history-visit`, with the same names and meanings:
 
-Capture rules, capture lists, `url_detail`, redaction and `max_hop_age_days` apply to opener edges exactly as to hops. `capture_scope` does not: the first visit in a new tab is usually one history can see, and the edge is the information rather than the visit.
+| Field | Meaning |
+|-------|---------|
+| `url`, `recorded_url` | The visited address, in full. Both hold the same value |
+| `domain` | Registered domain of the address's host (public suffix list), `not available` when there is none |
+| `title` | The page title, read when the record is emitted; empty when Chrome holds no history item for the address |
+| `visit_time`, `date` | When the visit happened, in milliseconds since the epoch. Both hold the same value |
+| `transition_type` | Chrome's transition type for the visit |
+| `is_local` | Whether the visit happened on this device |
+| `visit_id`, `referring_visit_id` | Chrome's visit id and the id of the visit that led to it, `0` when none |
+| `history_item_id`, `last_visit_time`, `visit_count`, `typed_count` | From the history item for the address, read when the record is emitted |
 
-Reading a tab's URL needs the `tabs` permission (or a host permission covering it). A host without it records no opener edges and is otherwise unchanged. Two limits: a tab left blank for more than 30 seconds before its first navigation is not attributed, and the reservation between tab creation and first navigation is held in memory only, so a worker killed in that window (milliseconds, in every measured case) loses the edge.
+The item-level fields come from the history item whose address matches exactly. A redirect step has none, so those fields are absent from its record and `title` is empty.
 
-**The join is exact within one profile's history, and only there.** `visit_id` is a row id in Chrome's history database for that profile, so it is unique across that profile's continuous history and means nothing outside it. A participant with a second computer, or a fresh profile, produces a second id space that starts over at low numbers — so ids from the two will collide and a naive join attaches the wrong URL to the wrong edge, silently.
+There are no list fields: no `category`, no allow or block list results.
 
-Partition by install before joining, using the same user-agent comparison rex-history's own `referring_visit_id` already requires. This is not a property of this module: it is how Chrome numbers visits, and it applies identically to walking rex-history's edges on their own.
+Tab fields, present when the visit is linked to a tab (see below): `tab_id`, `window_id`, `session_id`, `page_events_url_shown_at`.
 
-Note that reinstalling the *extension* on the same profile does not renumber anything — the history database belongs to the browser profile, not to the extension — so an install-time or extension-issued key would over-partition rather than help.
+### `rex-browsing-opener`
 
-Two further properties analysis should know about:
+Chrome records no referrer across a tab boundary, so a result opened in a new tab arrives with referring visit id `0`. With `tab_opener_edges` on, the first visit in a new tab is attributed to the page that opened it, from `chrome.tabs`. Fields: `visit_id`, `referring_visit_id` (the opener page's visit), `visit_time`, `date`, `transition`, `url`. In a redirect chain the edge attaches to the chain's first visit. Needs the `tabs` permission in the host extension.
 
-- **The series starts at install.** `onVisited` sees only live visits, so hops from before the module ships are unrecoverable and a backfill keeps its dangling references.
-- **A hop may arrive twice.** The drain emits before deleting, so a worker killed between the two re-emits next cycle. Deduplicate on `visit_id`.
+### `rex-browsing-page`
 
-### Internal pages: the pages Chrome keeps out of history
+With `internal_pages` on, the browser's own pages (`chrome://`, `chrome-untrusted://`, `edge://`), which Chrome keeps out of history, are recorded from `chrome.tabs`. Fields: `visit_time`, `date`, `tab_id`, `url`. There are no visit ids. These addresses can carry text the participant typed, such as a history search. Needs the `tabs` permission.
 
-Chrome never writes its own pages to history: `chrome://version/`, `chrome://settings/`, the new tab page, and AI Mode at `chrome://contextual-tasks/?chrome_task_id=…`. `onVisited` does not fire for them and they have no visit id, so neither rex-history nor the hop path can see them (AI-Extension#132). `tabs.onUpdated` does carry the URL a tab commits, so when a study names `chrome`, `chrome-untrusted` or `edge` in `schemes` (Edge serves its own pages as `edge://`), the module records each one as a `rex-visit-graph-page` point:
+## Tab link
 
-```json
-{
-  "visit_time": 1791489600000,
-  "tab_id": 1830512,
-  "capture_rule": "all",
-  "url": "chrome://contextual-tasks/",
-  "date": 1791489600000
-}
-```
+A visit is linked to the tab it happened in from a `rex-page-events` url-active record. The host extension must include rex-page-events, which sends the module a `pageUrlActive` message for each record. The module matches a record to a visit when the address is the same and the record's `url_shown_at` is within `page_events_link_tolerance_ms` of the visit time; the newest matching record wins. Either may arrive first. Set the tolerance to `0` to turn linking off. Without rex-page-events, visits are recorded without tab fields.
 
-`visit_time` is when the tab committed the URL, not a history timestamp. There are no ids, so these points do not join to the visit graph: they say which internal page was open, in which tab, and when. `tab_id` is Chrome's id for the tab during that browser session; it groups pages within a tab and does not survive a browser restart.
+## Lifecycle
 
-Capture rules, capture lists, `url_detail`, redaction and `max_hop_age_days` apply as they do to hops. At the default `"path"`, AI Mode is recorded as `chrome://contextual-tasks/`, without the task id; `"none"` keeps only the time. Every new tab opens on an internal page, so naming `chrome` also records one point per new tab.
-
-`file` and `chrome-extension` pages are left to the hop path, because Chrome does record those in history. Like opener edges, this path needs the `tabs` permission.
-
-## Installation
-
-Add to your extension's `package.json` dependencies:
-
-```json
-{
-  "dependencies": {
-    "@bric/rex-visit-graph": "github:bric-digital/rex-visit-graph#main"
-  }
-}
-```
-
-Then run `npm install`, and import the module for its side effects in your service worker:
-
-```ts
-import '@bric/rex-visit-graph/service-worker'
-```
-
-Hop capture needs no permission beyond `history`. Opener edges read the opener tab's URL, which needs `tabs`; without it that path records nothing and the rest of the module is unaffected.
+- **Before configuration is read.** Visits are held in `chrome.storage.local`, because a visit not captured while it happens cannot be recovered. When configuration arrives, the module keeps them if `enabled` is true and discards them if not.
+- **While disabled.** The default. The module holds no listeners and emits nothing. Anything it holds is discarded.
+- **Before an identifier exists.** Records are held, not emitted, so nothing goes out unattributed. They are emitted once rex-core's `getIdentifier` returns one.
+- **Age.** A record never emitted is discarded after `max_record_age_days`, whether or not the module is enabled or has an identifier.
+- **Emission.** The host sends `triggerBrowsingDrain`. Each record is dispatched, then deleted. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot.
 
 ## Messages
 
-| Message | Response | Purpose |
-|---------|----------|---------|
-| `triggerVisitGraphDrain` | number of hops emitted | Emit stored hops now instead of waiting for the alarm, so a host extension can drain on its own cadence |
+| Message | Direction | Effect |
+|---------|-----------|--------|
+| `triggerBrowsingDrain` | host to module | Emits stored records now. The response is the number of points emitted, or `0` when nothing was emitted (disabled, no identifier, a drain already running, or an error) |
+| `pageUrlActive` | rex-page-events to module | Carries a url-active record for the tab link. The response is `{ "success": true }` once stored |
 
-## Module Context Exports
+## Configuration
 
-- `./service-worker` - Service worker context
+The module reads the `browsing` section of the backend config. Every field has a default, so a study needs no block at all to leave the module off, and needs only `"enabled": true` to turn it on.
 
-There is no extension or browser context. The module has no UI and injects nothing into pages.
+The module declares the same settings in code, via `configurationDetails()` in `src/service-worker.mts`. A test asserts that declaration covers every setting the module reads.
 
-## Module conventions
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Turns the module on. Off, it captures and emits nothing and discards what it holds |
+| `page_events_link_tolerance_ms` | number | `5000` | Match window for linking a visit to a url-active record. `0` disables linking |
+| `tab_opener_edges` | boolean | `true` | Record `rex-browsing-opener` points |
+| `max_opener_visits` | number | `25000` | Ceiling on an opener page's visit count. Above it the page is not looked up, so tabs it opens get no opener record. `getVisits()` cannot be bounded and costs about a second on a page that re-records a visit every few seconds, charged per new tab. `0` removes the ceiling |
+| `internal_pages` | boolean | `false` | Record `rex-browsing-page` points |
+| `max_record_age_days` | number | `7` | Days after which a record never emitted is discarded |
 
-It is an ordinary REX service-worker module and does nothing bespoke.
+Example:
 
-| Convention | How this module meets it |
-|------------|--------------------------|
-| Extends `REXServiceWorkerModule` from `@bric/rex-core` | `VisitGraphServiceWorkerModule` |
-| Registers itself at import | `registerREXModule(plugin)` at module scope; consumers `import` for side effects |
-| `setup()` for one-time wiring | Subscribes to configuration changes, then loads configuration |
-| `refreshConfiguration()` as the activation hook | Re-reads `visit_graph`, updates rules, redactor and alarm |
-| `handleMessage()` returning a boolean | Claims `triggerVisitGraphDrain`, returns `false` for everything else so other modules see it |
-| `moduleName()` | Returns `VisitGraph` |
-| `configurationDetails()` | Self-describes every setting, as rex-page-manipulation does. Nothing consumes it yet; a test asserts it covers every setting actually read, so it cannot drift |
-| Emits through `dispatchEvent` | One `rex-visit-graph-hop` point per hop; PDK picks it up with no server change |
-| Configuration under its own key | `REXConfiguration.visit_graph`, defaults for every field |
-| Publishes `.mts` source | Consumers compile it with their own toolchain; toolchain is in `devDependencies` so they do not install it |
-| No functionality duplicated from rex-core | Configuration read via `rexCorePlugin.fetchConfiguration()`, never `chrome.storage` directly |
-
-Two conventions it deliberately does **not** follow, both because it has no UI:
-
-- No `./extension` or `./browser` export. The `exports` map has only `./service-worker`.
-- No `activateInterface()`. There is no interface to activate.
-
-## Design notes
-
-- **Capture never waits; emission always does.** A hop not captured while it happens is unrecoverable, so the listener runs before configuration exists and with the default rules already seeded. Points are dispatched only at drain, after configuration is available.
-- **One storage key per hop.** A single shared array lets concurrent handlers overwrite each other, which presents as the listener never firing.
-- **Emit, then forget.** A worker killed between the two re-emits next cycle; the other order loses the hop. Duplicates are recoverable in analysis, losses are not.
-- **`enabled: false` stops everything, not just capture.** No rules match, no drain alarm is scheduled, `drain()` refuses even when a host calls `triggerVisitGraphDrain` on its own cadence, and anything captured in the window before configuration arrived is discarded rather than held against a later re-enable.
-- **A study that narrows gets only what it asked for.** Until configuration arrives the module has no rules and captures everything under `all`. When configuration then narrows capture, those provisional hops are discarded rather than emitted: they cannot be re-tested against the arriving rules, because the address they would be tested on was dropped at capture. The window is small, since configuration is read from rex-core's cache within milliseconds of worker start.
-- **The module owns no alarm.** The host extension decides what runs when and drives draining with `triggerVisitGraphDrain`. A module scheduling itself would be invisible in the host's accounting of its own schedule. A host that never asks will accumulate hops until `max_hop_age_days` discards them.
-- **Configuration is applied by a synchronous `updateConfiguration()`.** `refreshConfiguration()` fetches from rex-core and hands over this module's section; `updateConfiguration()` assigns and returns. So a host or a test can configure the module directly, with no server round trip to fake.
-- **A disabled module holds no listener.** Listening follows the `enabled` flag: the listener is added when enabled and removed when disabled, rather than kept and made to decline. `setup()` starts listening before it fetches configuration, because the module defaults to enabled and `onVisited` fires once — a visit missed while the fetch is in flight is unrecoverable — and configuration then takes the listener away again if the study has the module off.
-- **The in-progress guard is in memory, never persisted**, so a killed worker cannot strand it and wedge every later drain.
-
-## Tests
-
-```
-npm install
-npm test
+```json
+{
+  "browsing": {
+    "enabled": true,
+    "internal_pages": false,
+    "max_record_age_days": 7
+  }
+}
 ```
 
-Loads the module as a real Chrome extension with real `chrome.history`, `chrome.storage` and `chrome.alarms`. Headless is off because Chrome's CDP bridge does not expose extension service workers in headless mode; wrap in Xvfb on Linux CI.
+## How it works
 
-`npm test` runs the `pretest` bundler. `npx playwright test` skips it and runs whatever bundle is already on disk.
+| File | Responsibility |
+|------|----------------|
+| `service-worker.mts` | The REX module: listeners, configuration, drain, message handling |
+| `visit-lookup.mts` | Turns a URL into its newest visit via `chrome.history.getVisits()` |
+| `visit-store.mts` | Holds recorded visits until they can be emitted |
+| `history-item.mts` | Reads the history-item fields and computes `domain` |
+| `tab-link.mts` | Links visits to tabs from url-active records |
+| `edge-store.mts` | One key per record in `chrome.storage.local`, under a prefix per kind of record |
+| `tab-opener.mts` | Attributes a new tab's first visit to the page that opened it |
+| `internal-pages.mts` | Records the browser's own pages from `chrome.tabs` |
 
-## License
+Capture and emission are separate because they answer to different constraints. `onVisited` fires once, so the listener is registered in `setup()` before configuration is read. Points may not be dispatched before configuration and an identifier exist, so emission waits for the drain. The store between them lets both hold.
 
-Apache 2.0
+## Adopting v3 from rex-visit-graph v2
+
+v3 changes what the module emits and what it is called. Every item below needs an edit in the host extension, the server config, or the analysis.
+
+Renames:
+
+| v2 | v3 |
+|----|----|
+| package `@bric/rex-visit-graph` | `@bric/rex-browsing` |
+| config section `visit_graph` | `browsing` |
+| message `triggerVisitGraphDrain` | `triggerBrowsingDrain` |
+| point `rex-visit-graph-hop` | `rex-browsing-visit` |
+| point `rex-visit-graph-opener` | `rex-browsing-opener` |
+| point `rex-visit-graph-page` | `rex-browsing-page` |
+| log prefix `[rex-visit-graph]` | `[rex-browsing]` |
+| storage prefixes `rexVisitGraph...` | `rexBrowsing...` |
+
+Behavior changes:
+
+- The module is off by default. v2 defaulted `enabled` to `true`.
+- It records every http and https visit, not only redirect hops, in the `rex-history-visit` structure. v2 hop points carried only ids and a redacted address.
+- Visits are held until configuration and an identifier exist.
+- Records past `max_record_age_days` are discarded in every state.
+- New: tab link fields and `page_events_link_tolerance_ms`.
+
+Removed settings: `capture_scope`, `capture_rules`, `capture_block_lists`, `capture_allow_lists`, `schemes`, `url_detail`, `debug`, `redaction`, `max_hop_age_days`. The last is replaced by `max_record_age_days`. The `capture_rule` field is no longer emitted. Without capture rules, `schemes` and `url_detail`, the module neither narrows what it records nor redacts addresses; redaction belongs to rex-content-processing.
+
+The module no longer reads rex-history's lists or consults whether rex-history can see a visit, so a visit may appear in both modules' data. `visit_id` is the join key between them.

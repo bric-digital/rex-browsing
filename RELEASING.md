@@ -1,11 +1,11 @@
-# Releasing rex-visit-graph
+# Releasing rex-browsing
 
 ## Why this exists
 
 This module is installed straight from GitHub, not from a registry:
 
 ```json
-"@bric/rex-visit-graph": "github:bric-digital/rex-visit-graph"
+"@bric/rex-browsing": "github:bric-digital/rex-browsing"
 ```
 
 A reference like that floats on the default branch. Two installs a week apart can resolve to different code while the `package.json` line looks identical, and a lockfile records the sha it happened to get rather than a version anyone chose. That is fine while a module is being built and wrong once a study depends on it.
@@ -13,7 +13,7 @@ A reference like that floats on the default branch. Two installs a week apart ca
 Tagging fixes it. A release **is** a tag, and consumers pin to it:
 
 ```json
-"@bric/rex-visit-graph": "github:bric-digital/rex-visit-graph#v1.0.0"
+"@bric/rex-browsing": "github:bric-digital/rex-browsing#v1.0.0"
 ```
 
 Now the version a study runs is a decision, upgrading is a visible edit, and a build from six months ago rebuilds identically.
@@ -56,7 +56,7 @@ Pinning is a separate, deliberate act in each extension that uses the module:
 
 ```
 cd ../AI-Extension
-# edit package.json to "github:bric-digital/rex-visit-graph#v1.0.0"
+# edit package.json to "github:bric-digital/rex-browsing#v1.0.0"
 npm install --allow-git=all
 npm run build
 ```

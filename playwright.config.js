@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * Playwright configuration for rex-visit-graph tests
+ * Playwright configuration for rex-browsing tests
  * @see https://playwright.dev/docs/test-configuration
  */
 export default defineConfig({

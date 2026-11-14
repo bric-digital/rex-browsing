@@ -7,9 +7,9 @@
 // A module is not published to a registry: consumers install it straight from
 // GitHub. So a release IS the tag, and pinning is what a consumer does with it:
 //
-//   "@bric/rex-visit-graph": "github:bric-digital/rex-visit-graph#v1.0.0"
+//   "@bric/rex-browsing": "github:bric-digital/rex-browsing#v1.0.0"
 //
-// That is the whole point of tagging. A bare `github:bric-digital/rex-visit-graph`
+// That is the whole point of tagging. A bare `github:bric-digital/rex-browsing`
 // floats on the default branch, so two installs a week apart can resolve to
 // different code with the same lockfile entry never looking wrong.
 //
@@ -90,4 +90,4 @@ console.log(`\nCreated tag ${tagName}.`);
 console.log(`Bumped package.json to ${pkg.version} — marked -dev so the repo never `
   + 'names a release that was not cut.');
 console.log(`Push with: git push origin ${branchName || 'main'} --follow-tags`);
-console.log(`Consumers pin with: "github:bric-digital/rex-visit-graph#${tagName}"`);
+console.log(`Consumers pin with: "github:bric-digital/rex-browsing#${tagName}"`);

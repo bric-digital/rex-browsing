@@ -473,7 +473,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       await this.tabLinker.clear()
 
       if (discarded > 0) {
-        console.log(`[rex-browsing] Disabled; discarded ${discarded} edge(s) captured before configuration.`)
+        console.log(`[rex-browsing] Disabled; discarded ${discarded} record(s) captured before configuration.`)
       }
     }
   }
@@ -492,13 +492,12 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   async setup(): Promise<void> {
-    console.log('[rex-browsing/service-worker] Setting up visit graph capture')
+    console.log('[rex-browsing/service-worker] Setting up browsing capture')
 
-    // Listen before configuration is fetched, because the module defaults to
-    // enabled and onVisited fires once: a visit missed while the fetch is in
-    // flight is unrecoverable. refreshConfiguration then removes the listener
-    // again if the study has the module turned off, so a disabled module ends up
-    // holding no listener and having emitted nothing.
+    // Listen before configuration is fetched, because onVisited fires once: a
+    // visit missed while the fetch is in flight is unrecoverable. Visits are held
+    // until configuration says whether to keep them, and refreshConfiguration
+    // removes the listeners if the study leaves the module off.
     this.startListening()
     this.startListeningForTabs()
 
