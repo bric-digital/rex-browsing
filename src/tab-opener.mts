@@ -59,7 +59,7 @@ export class OpenerStore extends EdgeStore<OpenerRecord> {
  * The first URL a tab commits may be the landing of a redirect chain whose root
  * is a redirect step this module recorded. Chrome recorded "0" on that root, not on the
  * landing, so the edge belongs there: it fills exactly the gap Chrome left, and
- * landing -> hop -> opener is then walkable end to end. If the root is not
+ * landing -> redirect step -> opener is then walkable end to end. If the root is not
  * among the visits held, the edge stays on the first committed visit.
  */
 export function chainRoot(record: OpenerRecord, visits: VisitRecord[]): { visit_id: string; visit_time: number; url: string } {
@@ -68,13 +68,13 @@ export function chainRoot(record: OpenerRecord, visits: VisitRecord[]): { visit_
 
   // Bounded, so a cycle in stored data cannot hang the drain.
   for (let steps = 0; steps < 16; steps += 1) {
-    const hop = byId.get(current.referring_visit_id)
+    const referrer = byId.get(current.referring_visit_id)
 
-    if (hop === undefined) {
+    if (referrer === undefined) {
       break
     }
 
-    current = hop
+    current = referrer
   }
 
   return { visit_id: current.visit_id, visit_time: current.visit_time, url: current.url }

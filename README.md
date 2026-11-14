@@ -12,7 +12,7 @@ REX module that records every http and https visit after install, in the same st
 
 ## Why
 
-rex-history reads the browser's history, so it can only describe what happened before it ran. A study also needs what happens after install, as it happens, shaped the same way so a researcher does not reconcile two formats across the install date. rex-browsing is that live record.
+Researchers compare what participants did before installing a REX extension with what they do after. rex-history reads Chrome history, the only source for browsing before install. After install a study can also record each visit as it happens, with the redirect steps history search omits and the link to its tab and page-events session, in the same structure as a `rex-history-visit`, so one analysis spans the install date. rex-browsing is that live record.
 
 Chrome also keeps redirect steps out of history search results, while the landing page still points at one through its referring visit id. `chrome.history.onVisited` fires for those steps, so recording from it means a landing page's `referring_visit_id` names a record that exists.
 
