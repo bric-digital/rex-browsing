@@ -169,25 +169,31 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   async drain(): Promise<number> {
-    // A host drains on its own cadence, so being switched off has to stop
-    // emission here rather than only stopping the alarm being scheduled.
-    if (!this.config.enabled || this.draining) {
+    if (this.draining) {
       return 0
     }
 
     this.draining = true
 
     try {
-      // Records wait for the participant to exist, so nothing is emitted unattributed.
-      if (!(await this.hasIdentifier())) {
-        return 0
-      }
-
-      // Sweep first, so a record past its age is discarded rather than sent.
+      // Sweep first and unconditionally, so a record past its age is discarded
+      // rather than held without bound while the module is unconfigured,
+      // disabled, or waiting on an identifier.
       const cutoff = Date.now() - (this.config.max_record_age_days * 24 * 60 * 60 * 1000)
       await this.visitStore.sweep(cutoff)
       await this.openerStore.sweep(cutoff)
       await this.pageStore.sweep(cutoff)
+
+      // A host drains on its own cadence, so being switched off has to stop
+      // emission here rather than only stopping the alarm being scheduled.
+      if (!this.config.enabled) {
+        return 0
+      }
+
+      // Records wait for the participant to exist, so nothing is emitted unattributed.
+      if (!(await this.hasIdentifier())) {
+        return 0
+      }
 
       const records = await this.visitStore.readAll()
       const openers = await this.openerStore.readAll()

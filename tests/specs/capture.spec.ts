@@ -556,6 +556,40 @@ test.describe('rex-browsing — real extension', () => {
     expect(result.emittedWith).toBe(1)
   })
 
+  test('sweeps held records past the age while the participant has no identifier', async () => {
+    const result = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      await chrome.storage.local.remove('rexIdentifier')
+      const old = Date.now() - (p.currentConfig().max_record_age_days + 1) * 24 * 60 * 60 * 1000
+      await p.visitStore.record({ url: 'https://www.example.com/old', visitId: '41', referringVisitId: '0', visitTime: old, transition: 'link', isLocal: true })
+      await p.visitStore.record({ url: 'https://www.example.com/fresh', visitId: '42', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true })
+
+      const drained = await p.drain()
+
+      return { drained, remaining: (await p.visitStore.readAll()).map((r: { visit_id: string }) => r.visit_id) }
+    })
+
+    expect(result.drained).toBe(0)
+    expect(result.remaining).toEqual(['42'])
+  })
+
+  test('sweeps visits held before configuration when configuration never arrives', async () => {
+    const remaining = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      p.simulateBeforeConfiguration()
+      const old = Date.now() - (p.currentConfig().max_record_age_days + 1) * 24 * 60 * 60 * 1000
+      await p.visitStore.record({ url: 'https://www.example.com/old', visitId: '43', referringVisitId: '0', visitTime: old, transition: 'link', isLocal: true })
+
+      await p.drain()
+
+      return (await p.visitStore.readAll()).length
+    })
+
+    expect(remaining).toBe(0)
+  })
+
   test('describes its own configuration surface', async () => {
     const details = await serviceWorker.evaluate(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
