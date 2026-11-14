@@ -15,11 +15,24 @@
 
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
 import { isRecordedScheme, newestVisit } from './visit-lookup.mjs'
-import { VisitStore, storageIdOf, type VisitRecord } from './visit-store.mjs'
+import type { RexVisitRecord } from '@bric/rex-types/types'
+import { VisitStore, storageIdOf, type IdsUnavailable, type TabLink, type VisitRecord } from './visit-store.mjs'
 import { historyItemFields, registeredDomain } from './history-item.mjs'
 import { OpenerStore, TabOpenerTracker, chainRoot } from './tab-opener.mjs'
 import { InternalPageRecorder, PageStore } from './internal-pages.mjs'
 import { TabLinker, isUrlActiveRecord } from './tab-link.mjs'
+
+type HistoryCounts = 'last_visit_time' | 'visit_count' | 'typed_count'
+
+/** The emitted visit: the shared record plus what only rex-browsing adds. */
+interface BrowsingVisitEvent extends Omit<RexVisitRecord, HistoryCounts>, Partial<TabLink> {
+  [key: string]: unknown;
+  name: 'rex-browsing-visit';
+  ids_unavailable?: IdsUnavailable;
+  last_visit_time?: number | undefined;
+  visit_count?: number | undefined;
+  typed_count?: number | undefined;
+}
 
 export interface BrowsingConfig {
   enabled: boolean;
@@ -239,7 +252,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
       for (const record of records) {
         if (record.ids_unavailable !== undefined) {
-          dispatchEvent({
+          const visit: BrowsingVisitEvent = {
             name: 'rex-browsing-visit',
             url: record.url,
             recorded_url: record.url,
@@ -249,7 +262,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
             domain: registeredDomain(record.url),
             ids_unavailable: record.ids_unavailable,
             ...(record.link ?? {})
-          })
+          }
+
+          dispatchEvent(visit)
 
           emitted.push(storageIdOf(record))
           continue
@@ -259,7 +274,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         // before the page's title is known.
         const item = await historyItemFields(record.url, record.visit_time)
 
-        dispatchEvent({
+        const visit: BrowsingVisitEvent = {
           name: 'rex-browsing-visit',
           url: record.url,
           recorded_url: record.url,
@@ -272,7 +287,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
           referring_visit_id: record.referring_visit_id,
           ...(item ?? { title: '' }),
           ...(record.link ?? {})
-        })
+        }
+
+        dispatchEvent(visit)
 
         emitted.push(record.visit_id)
       }
