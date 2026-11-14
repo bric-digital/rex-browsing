@@ -62,6 +62,13 @@ test.describe('rex-browsing — real extension', () => {
       const hopKeys = Object.keys(stored).filter((key) => key.startsWith('rexBrowsingVisit:'))
       if (hopKeys.length > 0) await chrome.storage.local.remove(hopKeys)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      p.updateConfiguration({ enabled: true })
+      await new Promise((resolve) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexCorePlugin.handleMessage({ messageType: 'setIdentifier', identifier: 'test-participant' }, null, resolve)
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(self as any).__capturedEvents = []
     })
   })
@@ -255,7 +262,7 @@ test.describe('rex-browsing — real extension', () => {
       return p.currentConfig()
     })
 
-    expect(config.enabled).toBe(true)
+    expect(config.enabled).toBe(false)
     expect(config.internal_pages).toBe(false)
     for (const removed of ['capture_scope', 'capture_rules', 'capture_block_lists', 'capture_allow_lists',
       'schemes', 'url_detail', 'debug', 'redaction']) {
@@ -271,7 +278,7 @@ test.describe('rex-browsing — real extension', () => {
             enabled: true,
             internal_pages: true,
             max_opener_visits: 10,
-            max_hop_age_days: 3
+            max_record_age_days: 3
           }
         }
       })
@@ -283,12 +290,12 @@ test.describe('rex-browsing — real extension', () => {
 
     expect(config.internal_pages).toBe(true)
     expect(config.max_opener_visits).toBe(10)
-    expect(config.max_hop_age_days).toBe(3)
+    expect(config.max_record_age_days).toBe(3)
   })
 
   test('triggerBrowsingDrain emits stored visits and answers with the count', async () => {
     const result = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.set({ REXConfiguration: {} })
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
       await p.refreshConfiguration()
@@ -392,6 +399,161 @@ test.describe('rex-browsing — real extension', () => {
 
     expect(result.drained).toBe(0)
     expect(result.emitted).toBe(0)
+  })
+
+  test('records nothing when configuration has the module off', async () => {
+    const result = await serviceWorker.evaluate(async () => {
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      await p.refreshConfiguration()
+
+      const real = chrome.history.getVisits
+      chrome.history.getVisits = async () => ([
+        { id: '1', visitId: '31', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true }
+      ]) as never
+      try {
+        await p.captureVisit({ id: '1', url: 'https://www.example.com/off' })
+      } finally {
+        chrome.history.getVisits = real
+      }
+      await p.drain()
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        events: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit'),
+        listening: p.isListening()
+      }
+    })
+
+    expect(result.events).toEqual([])
+    expect(result.listening).toBe(false)
+  })
+
+  test('records nothing when configuration omits the browsing section', async () => {
+    const result = await serviceWorker.evaluate(async () => {
+      await chrome.storage.local.set({ REXConfiguration: {} })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      await p.refreshConfiguration()
+
+      const real = chrome.history.getVisits
+      chrome.history.getVisits = async () => ([
+        { id: '1', visitId: '32', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true }
+      ]) as never
+      try {
+        await p.captureVisit({ id: '1', url: 'https://www.example.com/omitted' })
+      } finally {
+        chrome.history.getVisits = real
+      }
+      await p.drain()
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        events: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit'),
+        stored: (await p.visitStore.readAll()).length
+      }
+    })
+
+    expect(result.events).toEqual([])
+    expect(result.stored).toBe(0)
+  })
+
+  test('discards visits held before configuration when the study has the module off', async () => {
+    const result = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      p.simulateBeforeConfiguration()
+
+      await p.visitStore.record({ url: 'https://www.example.com/held', visitId: '33', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true })
+      const held = (await chrome.storage.local.getKeys()).filter((key) => key.startsWith('rexBrowsingVisit:')).length
+
+      p.updateConfiguration({ enabled: false })
+      await p.reconcileStore()
+      await p.drain()
+
+      return {
+        held,
+        keys: (await chrome.storage.local.getKeys()).filter((key) => key.startsWith('rexBrowsingVisit:')).length,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        emitted: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit').length
+      }
+    })
+
+    expect(result.held).toBe(1)
+    expect(result.keys).toBe(0)
+    expect(result.emitted).toBe(0)
+  })
+
+  test('captures a visit before configuration and records it once configuration enables the module', async () => {
+    const result = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      p.simulateBeforeConfiguration()
+
+      const real = chrome.history.getVisits
+      chrome.history.getVisits = async () => ([
+        { id: '1', visitId: '34', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true }
+      ]) as never
+      let captured = false
+      try {
+        captured = await p.captureVisit({ id: '1', url: 'https://www.example.com/early' })
+      } finally {
+        chrome.history.getVisits = real
+      }
+      const drainedBefore = await p.drain()
+
+      p.updateConfiguration({ enabled: true })
+      await p.reconcileStore()
+      const drainedAfter = await p.drain()
+
+      return {
+        captured,
+        drainedBefore,
+        drainedAfter,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        events: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
+      }
+    })
+
+    expect(result.captured).toBe(true)
+    expect(result.drainedBefore).toBe(0)
+    expect(result.drainedAfter).toBe(1)
+    expect(result.events).toHaveLength(1)
+    expect(result.events[0].visit_id).toBe('34')
+  })
+
+  test('holds records until the participant has an identifier', async () => {
+    const result = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const g = self as any
+      const p = g.rexBrowsingPlugin
+      await chrome.storage.local.remove('rexIdentifier')
+      await p.visitStore.record({ url: 'https://www.example.com/id', visitId: '35', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true })
+
+      const withoutIdentifier = await p.drain()
+      const storedWithout = (await p.visitStore.readAll()).length
+      const emittedWithout = g.__capturedEvents.filter((e: { name: string }) => e.name === 'rex-browsing-visit').length
+
+      await new Promise((resolve) => {
+        g.rexCorePlugin.handleMessage({ messageType: 'setIdentifier', identifier: 'participant-1' }, null, resolve)
+      })
+      const withIdentifier = await p.drain()
+
+      return {
+        withoutIdentifier,
+        storedWithout,
+        emittedWithout,
+        withIdentifier,
+        emittedWith: g.__capturedEvents.filter((e: { name: string }) => e.name === 'rex-browsing-visit').length
+      }
+    })
+
+    expect(result.withoutIdentifier).toBe(0)
+    expect(result.storedWithout).toBe(1)
+    expect(result.emittedWithout).toBe(0)
+    expect(result.withIdentifier).toBe(1)
+    expect(result.emittedWith).toBe(1)
   })
 
   test('describes its own configuration surface', async () => {
@@ -808,7 +970,7 @@ test.describe('rex-browsing — real extension', () => {
     async function openFromStart(selector: string, landing: string, config: Record<string, unknown> = {}) {
       await serviceWorker.evaluate((config) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration(config)
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, ...config })
       }, config)
 
       const tab = await context.newPage()
@@ -864,7 +1026,7 @@ test.describe('rex-browsing — real extension', () => {
       await serviceWorker.evaluate(async ({ opener, maxOpenerVisits }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
-        g.rexBrowsingPlugin.updateConfiguration({ max_opener_visits: maxOpenerVisits })
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_opener_visits: maxOpenerVisits })
 
         // A second visit, so the count exceeds a ceiling of one. The navigation
         // below supplies the first.
@@ -1027,11 +1189,11 @@ test.describe('rex-browsing — real extension', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
         const whenOff = p.isListeningForTabs()
-        p.updateConfiguration({ tab_opener_edges: true })
+        p.updateConfiguration({ enabled: true, tab_opener_edges: true })
         const whenOn = p.isListeningForTabs()
         p.updateConfiguration({ enabled: false })
         const whenDisabled = p.isListeningForTabs()
-        p.updateConfiguration({})
+        p.updateConfiguration({ enabled: true })
         return { whenOff, whenOn, whenDisabled, byDefault: p.isListeningForTabs() }
       })
 
@@ -1092,7 +1254,7 @@ test.describe('rex-browsing — real extension', () => {
     async function visitInternalPage(url: string, config: Record<string, unknown>) {
       await serviceWorker.evaluate((config) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration(config)
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, ...config })
       }, config)
 
       const tab = await context.newPage()
@@ -1155,7 +1317,7 @@ test.describe('rex-browsing — real extension', () => {
       const recorded = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
-        p.updateConfiguration({ internal_pages: true })
+        p.updateConfiguration({ enabled: true, internal_pages: true })
         return {
           web: await p.captureInternalPage(1, 'https://example.com/'),
           file: await p.captureInternalPage(1, 'file:///tmp/page.html'),
@@ -1172,7 +1334,7 @@ test.describe('rex-browsing — real extension', () => {
         const p = (self as any).rexBrowsingPlugin
         p.updateConfiguration({ enabled: false, internal_pages: true })
         const whenDisabled = await p.captureInternalPage(1, 'chrome://version/')
-        p.updateConfiguration({ internal_pages: true })
+        p.updateConfiguration({ enabled: true, internal_pages: true })
         const whenEnabled = await p.captureInternalPage(1, 'chrome://version/')
         return { whenDisabled, whenEnabled }
       })
@@ -1186,9 +1348,9 @@ test.describe('rex-browsing — real extension', () => {
       const result = await serviceWorker.evaluate(() => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
-        p.updateConfiguration({ tab_opener_edges: false })
+        p.updateConfiguration({ enabled: true, tab_opener_edges: false })
         const withNeither = p.isListeningForTabs()
-        p.updateConfiguration({ tab_opener_edges: false, internal_pages: true })
+        p.updateConfiguration({ enabled: true, tab_opener_edges: false, internal_pages: true })
         const withPages = p.isListeningForTabs()
         // A new tab with an opener would start an opener lookup if this
         // listener still served opener edges.
@@ -1207,7 +1369,7 @@ test.describe('rex-browsing — real extension', () => {
       const remaining = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
-        p.updateConfiguration({ internal_pages: true })
+        p.updateConfiguration({ enabled: true, internal_pages: true })
         await p.captureInternalPage(1, 'chrome://version/')
         const beforeDisable = (await p.pageStore.readAll()).length
         await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })

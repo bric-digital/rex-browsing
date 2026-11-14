@@ -29,3 +29,4 @@ g.__capturedEvents = []
 registerREXModule(new EventCaptureModule())
 
 g.rexBrowsingPlugin = plugin
+g.rexCorePlugin = rexCorePlugin

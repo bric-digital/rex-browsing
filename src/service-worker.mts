@@ -7,9 +7,10 @@
  * both recorded and the landing's `referring_visit_id` names the step. Nothing
  * here needs rex-history to be installed.
  *
- * Capture runs unconditionally. Emission waits for configuration, because points
- * must not be dispatched before it exists — but a visit that is not captured
- * while it happens is unrecoverable, so the listener does not wait for anything.
+ * Capture runs until configuration says otherwise. Emission waits for configuration
+ * and an identifier, because points must not be dispatched before either exists —
+ * but a visit that is not captured while it happens is unrecoverable, so the
+ * listener does not wait for anything.
  */
 
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
@@ -37,11 +38,11 @@ export interface BrowsingConfig {
   max_opener_visits: number;
   /** Records the browser's own pages, which Chrome keeps out of history. */
   internal_pages: boolean;
-  max_hop_age_days: number;
+  max_record_age_days: number;
 }
 
 const DEFAULT_CONFIG: BrowsingConfig = {
-  enabled: true,
+  enabled: false,
   tab_opener_edges: true,
   // Chosen from the measured cost, which scales with the count: 440,000 visits
   // resolve in ~1075ms, so ~2.4us each, and 25,000 is about 60ms. Above any
@@ -50,7 +51,7 @@ const DEFAULT_CONFIG: BrowsingConfig = {
   // judgement, not a finding, which is why it is server config.
   max_opener_visits: 25_000,
   internal_pages: false,
-  max_hop_age_days: 7
+  max_record_age_days: 7
 }
 
 class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
@@ -70,6 +71,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
   /** In-memory, never persisted: a fresh worker restarts with it clear. */
   private draining = false
+
+  /** False until the first updateConfiguration, so a visit before it is held rather than refused. */
+  private configured = false
 
   /** Held so it can be removed again; a listener is only removable by reference. */
   private historyListener: ((item: chrome.history.HistoryItem) => void) | null = null
@@ -92,8 +96,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   override configurationDetails(): any {
     return {
       browsing: {
-        enabled: 'Boolean, true if module is active, false otherwise. When false nothing is captured, '
-          + 'nothing is emitted even if a host asks, and anything already captured is discarded.',
+        enabled: 'Boolean, default false. True if module is active, false otherwise. When false nothing is '
+          + 'captured, nothing is emitted even if a host asks, and anything already captured is discarded. '
+          + 'Visits that happen before configuration is read are held, then kept or discarded by this flag.',
         tab_opener_edges: 'Boolean, default true. Attributes the first visit in a new tab to the page '
           + 'that opened it, emitted as rex-browsing-opener points. Chrome records no referrer across '
           + 'a tab boundary, so without this a result opened in a new tab arrives from nowhere. Needs the '
@@ -107,7 +112,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
           + 'chrome-untrusted://, edge://), which Chrome keeps out of history, as rex-browsing-page '
           + 'points with no visit ids. These addresses can carry text the participant typed. Needs '
           + 'the tabs permission.',
-        max_hop_age_days: 'Number, days after which a record that was never emitted is discarded.'
+        max_record_age_days: 'Number, default 7. Days after which a record that was never emitted is discarded.'
       }
     }
   }
@@ -120,7 +125,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     // Checked here as well as by removing the listener, deliberately: two
     // independent guards, and the failure direction of each is to collect
     // nothing.
-    if (!this.config.enabled || item.url === undefined || !isRecordedScheme(item.url)) {
+    if (!this.isAccepting() || item.url === undefined || !isRecordedScheme(item.url)) {
       return false
     }
 
@@ -138,11 +143,29 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
   /** A tab committed a URL Chrome may keep out of history. */
   async captureInternalPage(tabId: number, url: string): Promise<boolean> {
-    if (!this.config.enabled) {
+    if (!this.isAccepting()) {
       return false
     }
 
     return this.internalPages.pageCommitted(tabId, url)
+  }
+
+  /**
+   * Before configuration arrives the module cannot know whether the study wants
+   * it, and a visit not captured while it happens is unrecoverable, so it
+   * accepts; reconcileStore then discards what a disabled study should not have.
+   */
+  private isAccepting(): boolean {
+    return !this.configured || this.config.enabled
+  }
+
+  /** The identifier belongs to rex-core; an empty or absent one means the participant has none yet. */
+  async hasIdentifier(): Promise<boolean> {
+    return new Promise((resolve) => {
+      rexCorePlugin.handleMessage({ messageType: 'getIdentifier' }, null, (response) => {
+        resolve(typeof response === 'string' && response !== '')
+      })
+    })
   }
 
   async drain(): Promise<number> {
@@ -155,8 +178,13 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.draining = true
 
     try {
+      // Records wait for the participant to exist, so nothing is emitted unattributed.
+      if (!(await this.hasIdentifier())) {
+        return 0
+      }
+
       // Sweep first, so a record past its age is discarded rather than sent.
-      const cutoff = Date.now() - (this.config.max_hop_age_days * 24 * 60 * 60 * 1000)
+      const cutoff = Date.now() - (this.config.max_record_age_days * 24 * 60 * 60 * 1000)
       await this.visitStore.sweep(cutoff)
       await this.openerStore.sweep(cutoff)
       await this.pageStore.sweep(cutoff)
@@ -275,6 +303,12 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.draining = false
   }
 
+  /** Test seam: the state of a worker that has not yet read configuration. */
+  simulateBeforeConfiguration(): void {
+    this.configured = false
+    this.config = DEFAULT_CONFIG
+  }
+
   /**
    * Test seam: a worker killed mid-drain leaves the guard set in the instance
    * that died. It resets on restart on its own, because `draining` is a plain
@@ -292,6 +326,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
    */
   updateConfiguration(section: Partial<BrowsingConfig> | undefined): void {
     this.config = { ...DEFAULT_CONFIG, ...(section ?? {}) }
+    this.configured = true
 
     // Listening follows the enabled flag: a disabled module holds no listener at
     // all, rather than holding one that declines to act. Both calls are
