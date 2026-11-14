@@ -36,7 +36,7 @@ Fields shared with `rex-history-visit`, with the same names and meanings:
 
 | Field | Meaning |
 |-------|---------|
-| `url`, `recorded_url` | The visited address, in full. Both hold the same value |
+| `url` | The visited address, in full. `rex-history-visit` also carries `recorded_url`, always equal to its `url`; this record leaves it out |
 | `domain` | Registered domain of the address's host (public suffix list), `not available` when there is none |
 | `title` | The page title, read when the record is emitted; empty when Chrome holds no history item for the address |
 | `visit_time`, `date` | When the visit happened, in milliseconds since the epoch. Both hold the same value |
@@ -56,7 +56,7 @@ Tab fields, present when the visit is linked to a tab (see below): `tab_id`, `wi
 - `over_ceiling`: the address has more visits than `max_visits_per_url`, so the module did not look it up.
 - `lookup_failed`: Chrome's visit lookup returned nothing or failed, for example because the address was deleted from history within milliseconds.
 
-Such a record has `url`, `recorded_url`, `domain`, `title`, `visit_time` and `date`, plus tab fields when linked. It has no `visit_id`, `referring_visit_id`, `transition_type` or `is_local`. `title` and the history-item fields are read when the record is emitted, as for any visit; when Chrome holds no history item for the address, the history-item fields are absent and `title` is the one `onVisited` reported. Analysis can count the visit, place it in time and group it by address, domain or tab. It cannot join it to a `rex-history-visit` by `visit_id`, follow its referral chain, or tell redirect steps from landings. Two such visits to one address at different times are two records; the same visit emitted twice (see Lifecycle) has no `visit_id` to match on, so match on `url` and `visit_time`.
+Such a record has `url`, `domain`, `title`, `visit_time` and `date`, plus tab fields when linked. It has no `visit_id`, `referring_visit_id`, `transition_type` or `is_local`. `title` and the history-item fields are read when the record is emitted, as for any visit; when Chrome holds no history item for the address, the history-item fields are absent and `title` is the one `onVisited` reported. Analysis can count the visit, place it in time and group it by address, domain or tab. It cannot join it to a `rex-history-visit` by `visit_id`, follow its referral chain, or tell redirect steps from landings. Two such visits to one address at different times are two records; the same visit emitted twice (see Lifecycle) has no `visit_id` to match on, so match on `url` and `visit_time`.
 
 ### `rex-browsing-visit-ceiling-exceeded`
 

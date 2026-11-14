@@ -224,7 +224,7 @@ test.describe('rex-browsing — real extension', () => {
     const first = result.events.find((e: any) => e.visit_id === '5')
     expect(first.referring_visit_id).toBe('4')
     expect(first.url).toBe('https://www.example.com/a?q=1')
-    expect(first.recorded_url).toBe('https://www.example.com/a?q=1')
+    expect(first).not.toHaveProperty('recorded_url')
     expect(first.transition_type).toBe('link')
     expect(first.is_local).toBe(true)
     expect(first).not.toHaveProperty('capture_rule')
@@ -937,7 +937,7 @@ test.describe('rex-browsing — real extension', () => {
       const recorded = matching[0]
       expect(recorded.name).toBe('rex-browsing-visit')
       expect(recorded.url).toBe(visitedUrl)
-      expect(recorded.recorded_url).toBe(visitedUrl)
+      expect(recorded).not.toHaveProperty('recorded_url')
       expect(recorded.domain).toBe('example.com')
       expect(recorded.title).toBe(PAGE_TITLE)
       expect(typeof recorded.visit_id).toBe('string')
@@ -1124,7 +1124,6 @@ test.describe('rex-browsing — real extension', () => {
       expect(recorded).toEqual({
         name: 'rex-browsing-visit',
         url: neverVisited,
-        recorded_url: neverVisited,
         title: 'Gone',
         visit_time: visitTime,
         date: visitTime,

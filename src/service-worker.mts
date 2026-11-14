@@ -257,7 +257,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
           const visit: BrowsingVisitEvent = {
             name: 'rex-browsing-visit',
             url: record.url,
-            recorded_url: record.url,
             visit_time: record.visit_time,
             date: record.visit_time,
             domain: registeredDomain(record.url),
@@ -279,7 +278,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         const visit: BrowsingVisitEvent = {
           name: 'rex-browsing-visit',
           url: record.url,
-          recorded_url: record.url,
           domain: registeredDomain(record.url),
           visit_time: record.visit_time,
           transition_type: record.transition_type,
