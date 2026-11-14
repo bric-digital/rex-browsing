@@ -76,7 +76,7 @@ A visit is linked to the tab it happened in from a `rex-page-events` url-active 
 
 ## Lifecycle
 
-- **Before configuration is read.** Visits are held in `chrome.storage.local`, because a visit not captured while it happens cannot be recovered. When configuration arrives, the module keeps them if `enabled` is true and discards them if not.
+- **Before configuration arrives.** Nothing is recorded. The module waits for rex-core to store a configuration, so coverage starts then, not at install. With `enabled` only in server configuration, that is when onboarding fetches it.
 - **While disabled.** The default. The module holds no listeners and emits nothing. Anything it holds is discarded.
 - **Before an identifier exists.** Records are held, not emitted, so nothing goes out unattributed. They are emitted once rex-core's `getIdentifier` returns one.
 - **Age.** A record never emitted is discarded at the next drain after it passes `max_record_age_days`, whether or not the module is enabled or has an identifier.
@@ -129,11 +129,11 @@ Example:
 | `tab-opener.mts` | Attributes a new tab's first visit to the page that opened it |
 | `internal-pages.mts` | Records the browser's own pages from `chrome.tabs` |
 
-Capture and emission are separate because they answer to different constraints. `onVisited` fires once, so the listener is registered in `setup()` before configuration is read. Points may not be dispatched before configuration and an identifier exist, so emission waits for the drain. The store between them lets both hold.
+Capture and emission are separate because they answer to different constraints. Capture starts once configuration turns the module on. Points may not be dispatched before an identifier exists, so emission waits for the drain. The store between them holds visits until then.
 
 ## Depends on
 
-`@bric/rex-types` for the `RexVisitRecord` type that `rex-browsing-visit` and `rex-history-visit` share. `package.json` pins it to a commit on a rex-types branch until that branch's pull request merges. Switch the pin back to `github:bric-digital/rex-types` before tagging v3.0.0.
+`@bric/rex-types` for the `RexVisitRecord` type that `rex-browsing-visit` and `rex-history-visit` share. `package.json` pins it to a commit on a rex-types branch until that branch's pull request merges. Before tagging v3.0.0, pin rex-types' release tag, or the merge commit on its main while rex-types has no tags.
 
 ## Adopting v3 from rex-visit-graph v2
 
@@ -156,7 +156,7 @@ Behavior changes:
 
 - The module is off by default. v2 defaulted `enabled` to `true`.
 - It records every http and https visit, not only redirect hops, in the `rex-history-visit` structure. v2 hop points carried only ids and a redacted address.
-- Visits are held until configuration and an identifier exist.
+- Nothing is recorded before configuration arrives. Visits are held until an identifier exists.
 - Records past `max_record_age_days` are discarded in every state.
 - New: tab link fields and `page_events_link_tolerance_ms`.
 - New: `max_visits_per_url` (default `10000`), which bounds the visits recorded with ids per address. Above it, and when the lookup fails, visits are recorded without ids and carry `ids_unavailable`. Analysis that assumes every `rex-browsing-visit` has a `visit_id` must handle the absence.

@@ -57,6 +57,8 @@ export interface BrowsingConfig {
   max_record_age_days: number;
 }
 
+const CONFIGURATION_TIMEOUT_MS = 10000
+
 const DEFAULT_CONFIG: BrowsingConfig = {
   enabled: false,
   page_events_link_tolerance_ms: 5000,
@@ -89,7 +91,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   /** In-memory, never persisted: a fresh worker restarts with it clear. */
   private draining = false
 
-  /** False until the first updateConfiguration, so a visit before it is held rather than refused. */
+  /** False until the first updateConfiguration; nothing is recorded before it. */
   private configured = false
 
   /** Held so it can be removed again; a listener is only removable by reference. */
@@ -115,7 +117,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       browsing: {
         enabled: 'Boolean, default false. True if module is active, false otherwise. When false nothing is '
           + 'captured, nothing is emitted even if a host asks, and anything already captured is discarded. '
-          + 'Visits that happen before configuration is read are held, then kept or discarded by this flag.',
+          + 'Visits that happen before configuration arrives are not recorded.',
         page_events_link_tolerance_ms: 'Number, default 5000. A visit is linked to the tab it happened in '
           + 'from a rex-page-events url-active record with the same URL shown within this many '
           + 'milliseconds of the visit; the newest such record wins. 0 disables linking.',
@@ -198,13 +200,8 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     return this.internalPages.pageCommitted(tabId, url)
   }
 
-  /**
-   * Before configuration arrives the module cannot know whether the study wants
-   * it, and a visit not captured while it happens is unrecoverable, so it
-   * accepts; reconcileStore then discards what a disabled study should not have.
-   */
   private isAccepting(): boolean {
-    return !this.configured || this.config.enabled
+    return this.configured && this.config.enabled
   }
 
   /** The identifier belongs to rex-core; an empty or absent one means the participant has none yet. */
@@ -444,6 +441,8 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   simulateBeforeConfiguration(): void {
     this.configured = false
     this.config = DEFAULT_CONFIG
+    this.stopListening()
+    this.stopListeningForTabs()
   }
 
   /**
@@ -571,17 +570,27 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       await this.tabLinker.clear()
 
       if (discarded > 0) {
-        console.log(`[rex-browsing] Disabled; discarded ${discarded} record(s) captured before configuration.`)
+        console.log(`[rex-browsing] Disabled; discarded ${discarded} stored record(s).`)
       }
     }
   }
 
-  /** rex-core's activation hook: fetch, then hand this module's own section over. */
+  /** Resolves once rex-core has a stored configuration; never resolves if none arrives before the timeout. */
+  private waitForConfiguration(): Promise<Record<string, unknown>> {
+    return new Promise((resolve) => {
+      rexCorePlugin.handleMessage({
+        messageType: 'waitForConfiguration',
+        event: { timeout: CONFIGURATION_TIMEOUT_MS }
+      }, null, resolve)
+    })
+  }
+
+  /** rex-core's activation hook: wait for configuration, then hand this module's own section over. */
   async refreshConfiguration(): Promise<void> {
     try {
-      const all = await rexCorePlugin.fetchConfiguration() as Record<string, unknown> | undefined
+      const all = await this.waitForConfiguration()
 
-      this.updateConfiguration(all?.['browsing'] as Partial<BrowsingConfig> | undefined)
+      this.updateConfiguration(all['browsing'] as Partial<BrowsingConfig> | undefined)
 
       await this.reconcileStore()
     } catch (error) {
@@ -591,13 +600,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
   async setup(): Promise<void> {
     console.log('[rex-browsing/service-worker] Setting up browsing capture')
-
-    // Listen before configuration is fetched, because onVisited fires once: a
-    // visit missed while the fetch is in flight is unrecoverable. Visits are held
-    // until configuration says whether to keep them, and refreshConfiguration
-    // removes the listeners if the study leaves the module off.
-    this.startListening()
-    this.startListeningForTabs()
 
     await this.refreshConfiguration()
   }

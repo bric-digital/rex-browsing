@@ -98,11 +98,11 @@ test.describe('rex-browsing — real extension', () => {
     expect(stored).toEqual(['rexBrowsingVisit:5'])
   })
 
-  test('captures even when no configuration has loaded', async () => {
+  test('records nothing before configuration arrives', async () => {
     const stored = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.remove('REXConfiguration')
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
+      p.simulateBeforeConfiguration()
       const real = chrome.history.getVisits
       chrome.history.getVisits = async () => ([
         { id: '1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true }
@@ -112,10 +112,13 @@ test.describe('rex-browsing — real extension', () => {
       } finally {
         chrome.history.getVisits = real
       }
-      return await p.visitStore.readAll()
+      return {
+        records: (await p.visitStore.readAll()).length,
+        listening: p.isListening()
+      }
     })
 
-    expect(stored).toHaveLength(1)
+    expect(stored).toEqual({ records: 0, listening: false })
   })
 
   test('does not record non-http schemes as visits', async () => {
@@ -405,12 +408,7 @@ test.describe('rex-browsing — real extension', () => {
     expect(stored).toHaveLength(0)
   })
 
-  test('a disabled module emits nothing, including visits captured before config arrived', async () => {
-    // The listener is registered before configuration loads, so a cold worker
-    // does not miss visits. On an arm where the module is disabled that window
-    // can still capture, and the host calls triggerBrowsingDrain on its own
-    // cadence — so "disabled" has to mean nothing is emitted, not merely that the
-    // drain alarm is never scheduled.
+  test('a disabled module emits nothing, including visits stored while it was on', async () => {
     const result = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
@@ -529,37 +527,19 @@ test.describe('rex-browsing — real extension', () => {
     expect(result.stored).toBe(0)
   })
 
-  test('discards visits held before configuration when the study has the module off', async () => {
+  test('waits for configuration stored after setup, then starts recording', async () => {
     const result = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
+      await chrome.storage.local.remove('REXConfiguration')
       p.simulateBeforeConfiguration()
 
-      await p.visitStore.record({ url: 'https://www.example.com/held', visitId: '33', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true })
-      const held = (await chrome.storage.local.getKeys()).filter((key) => key.startsWith('rexBrowsingVisit:')).length
+      const refreshed = p.refreshConfiguration()
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      const listeningBefore = p.isListening()
 
-      p.updateConfiguration({ enabled: false })
-      await p.reconcileStore()
-      await p.drain()
-
-      return {
-        held,
-        keys: (await chrome.storage.local.getKeys()).filter((key) => key.startsWith('rexBrowsingVisit:')).length,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        emitted: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit').length
-      }
-    })
-
-    expect(result.held).toBe(1)
-    expect(result.keys).toBe(0)
-    expect(result.emitted).toBe(0)
-  })
-
-  test('captures a visit before configuration and records it once configuration enables the module', async () => {
-    const result = await serviceWorker.evaluate(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.simulateBeforeConfiguration()
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
+      await refreshed
 
       const real = chrome.history.getVisits
       chrome.history.getVisits = async () => ([
@@ -567,30 +547,15 @@ test.describe('rex-browsing — real extension', () => {
       ]) as never
       let captured = false
       try {
-        captured = await p.captureVisit({ id: '1', url: 'https://www.example.com/early' })
+        captured = await p.captureVisit({ id: '1', url: 'https://www.example.com/after-onboarding' })
       } finally {
         chrome.history.getVisits = real
       }
-      const drainedBefore = await p.drain()
 
-      p.updateConfiguration({ enabled: true })
-      await p.reconcileStore()
-      const drainedAfter = await p.drain()
-
-      return {
-        captured,
-        drainedBefore,
-        drainedAfter,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        events: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
-      }
+      return { listeningBefore, listeningAfter: p.isListening(), captured }
     })
 
-    expect(result.captured).toBe(true)
-    expect(result.drainedBefore).toBe(0)
-    expect(result.drainedAfter).toBe(1)
-    expect(result.events).toHaveLength(1)
-    expect(result.events[0].visit_id).toBe('34')
+    expect(result).toEqual({ listeningBefore: false, listeningAfter: true, captured: true })
   })
 
   test('holds records until the participant has an identifier', async () => {
@@ -826,24 +791,21 @@ test.describe('rex-browsing — real extension', () => {
     expect(states.whenReEnabled).toBe(true)
   })
 
-  test('listens before configuration arrives, since a missed visit is unrecoverable', async () => {
+  test('does not listen during setup until configuration turns the module on', async () => {
     const listening = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
-      await p.refreshConfiguration()
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
+      p.simulateBeforeConfiguration()
 
-      // setup() starts listening synchronously, before it awaits the fetch.
       const promise = p.setup()
-      const duringFetch = p.isListening()
+      const duringSetup = p.isListening()
       await promise
 
-      return { duringFetch, afterFetch: p.isListening() }
+      return { duringSetup, afterSetup: p.isListening() }
     })
 
-    expect(listening.duringFetch).toBe(true)
-    // ...and the disabled configuration then takes the listener away again.
-    expect(listening.afterFetch).toBe(false)
+    expect(listening).toEqual({ duringSetup: false, afterSetup: true })
   })
 
   // -------------------------------------------------------------------------
@@ -2119,20 +2081,15 @@ test.describe('rex-browsing — real extension', () => {
       expect(await storedUrlActive()).toBeUndefined()
     })
 
-    test('a configuration that disables the module discards url-active records held before it', async () => {
-      const held = await serviceWorker.evaluate(async () => {
+    test('holds no url-active record before configuration arrives', async () => {
+      const answered = await serviceWorker.evaluate(async (event) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.simulateBeforeConfiguration()
-      }).then(() => announce(urlActive(Date.now())))
-        .then(() => storedUrlActive())
+        const g = self as any
+        g.rexBrowsingPlugin.simulateBeforeConfiguration()
+        return g.rexBrowsingPlugin.handleMessage({ messageType: 'pageUrlActive', event }, null, () => undefined)
+      }, urlActive(Date.now()))
 
-      await serviceWorker.evaluate(async () => {
-        await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (self as any).rexBrowsingPlugin.refreshConfiguration()
-      })
-
-      expect(held).toHaveLength(1)
+      expect(answered).toBe(false)
       expect(await storedUrlActive()).toBeUndefined()
     })
 
