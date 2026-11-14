@@ -80,7 +80,7 @@ A visit is linked to the tab it happened in from the module's own `chrome.webNav
 - **While disabled.** The default. The module holds no listeners and emits nothing. Anything it holds is discarded.
 - **Before an identifier exists.** Records are held, not emitted, so nothing goes out unattributed. They are emitted once rex-core's `getIdentifier` returns one.
 - **Age.** A record never emitted is discarded at the next drain after it passes `max_record_age_days`, whether or not the module is enabled or has an identifier.
-- **Emission.** The host sends `triggerBrowsingDrain`. Each record is dispatched, then deleted. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot. A visit can also be emitted twice when its tab link lands during a drain: the second copy carries the tab fields. Duplicates share `visit_id`, and the linked copy is the fuller one.
+- **Emission.** The host sends `triggerBrowsingDrain`. Each record is dispatched, then deleted. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot. A visit is emitted once it is older than `tab_link_tolerance_ms`, so its tab fields are in place first; a navigation arriving later than that is not attached.
 
 ## Messages
 

@@ -63,7 +63,7 @@ test.describe('rex-browsing — real extension', () => {
       if (hopKeys.length > 0) await chrome.storage.local.remove(hopKeys)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      p.updateConfiguration({ enabled: true })
+      p.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 0 })
       await new Promise((resolve) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ;(self as any).rexCorePlugin.handleMessage({ messageType: 'setIdentifier', identifier: 'test-participant' }, null, resolve)
@@ -209,7 +209,7 @@ test.describe('rex-browsing — real extension', () => {
     const result = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      p.updateConfiguration({ enabled: true })
+      p.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 0 })
       await p.visitStore.record({ url: 'https://www.example.com/a?q=1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true })
       await p.visitStore.record({ url: 'https://www.example.com/b', visitId: '9', referringVisitId: '8', visitTime: Date.now(), transition: 'typed', isLocal: false })
 
@@ -366,7 +366,7 @@ test.describe('rex-browsing — real extension', () => {
 
   test('triggerBrowsingDrain emits stored visits and answers with the count', async () => {
     const result = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true, tab_link_tolerance_ms: 0 } } })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
       await p.refreshConfiguration()
@@ -848,7 +848,7 @@ test.describe('rex-browsing — real extension', () => {
 
       await serviceWorker.evaluate(async () => {
         await chrome.storage.local.set({
-          REXConfiguration: { browsing: { enabled: true } },
+          REXConfiguration: { browsing: { enabled: true, tab_link_tolerance_ms: 500 } },
           rexIdentifier: 'browsing-test-participant'
         })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1026,7 +1026,7 @@ test.describe('rex-browsing — real extension', () => {
       await serviceWorker.evaluate((url) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
-        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1, tab_link_tolerance_ms: 500 })
         g.__firedCounts = []
         g.__firedListener = (item: chrome.history.HistoryItem) => {
           if (item.url === url) g.__firedCounts.push(item.visitCount)
@@ -1100,7 +1100,7 @@ test.describe('rex-browsing — real extension', () => {
 
       await serviceWorker.evaluate(() => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1, tab_link_tolerance_ms: 500 })
       })
 
       // The over-ceiling visits are given times before the real one, as real
@@ -1144,6 +1144,46 @@ test.describe('rex-browsing — real extension', () => {
       expect(ordinary.visit_id).toBeDefined()
     })
 
+    test('ceiling events count only the visits emitted in that drain', async () => {
+      const heavyUrl = `${ORIGIN}/plain?marker=${marker()}`
+
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({
+          enabled: true, max_visits_per_url: 1, tab_link_tolerance_ms: 500
+        })
+      })
+
+      const before = Date.now()
+      await visit(heavyUrl)
+
+      await serviceWorker.evaluate(async ({ url, before }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (self as any).rexBrowsingPlugin
+        await p.captureVisit({ id: '1', url, title: 'Heavy', lastVisitTime: before, visitCount: 2 })
+        await p.captureVisit({ id: '1', url, title: 'Heavy', lastVisitTime: before + 1, visitCount: 3 })
+        await p.captureVisit({ id: '1', url, title: 'Heavy', lastVisitTime: Date.now() + 60_000, visitCount: 4 })
+      }, { url: heavyUrl, before })
+
+      const result = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        return g.__capturedEvents
+      })
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ceilingEvents = result.filter((e: any) => e.name === 'pdk-app-event'
+        && e.event_name === 'rex-browsing-visit-ceiling-exceeded')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const heavy = result.filter((e: any) => e.url === heavyUrl && e.ids_unavailable === 'over_ceiling')
+
+      expect(heavy).toHaveLength(2)
+      expect(ceilingEvents).toHaveLength(1)
+      expect(ceilingEvents[0].event_details.visits_in_drain).toBe(2)
+    })
+
     test('reports the ceiling in force when the visit was recorded, not at drain', async () => {
       const heavyUrl = `${ORIGIN}/plain?marker=${marker()}`
       const before = Date.now()
@@ -1152,9 +1192,9 @@ test.describe('rex-browsing — real extension', () => {
       const ceilingEvents = await serviceWorker.evaluate(async ({ url, before }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
-        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1, tab_link_tolerance_ms: 500 })
         await g.rexBrowsingPlugin.captureVisit({ id: '1', url, title: 'Heavy', lastVisitTime: before, visitCount: 2 })
-        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 5 })
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 5, tab_link_tolerance_ms: 500 })
         g.__capturedEvents = []
         await g.rexBrowsingPlugin.drain()
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1175,7 +1215,7 @@ test.describe('rex-browsing — real extension', () => {
       const dates = await serviceWorker.evaluate(async ({ urls, before }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
-        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1, tab_link_tolerance_ms: 500 })
         for (const url of urls) {
           await g.rexBrowsingPlugin.captureVisit({ id: '1', url, title: '', lastVisitTime: before, visitCount: 2 })
         }
@@ -1206,7 +1246,7 @@ test.describe('rex-browsing — real extension', () => {
 
       await serviceWorker.evaluate(async (url) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1, tab_link_tolerance_ms: 500 })
         // A first visit, so the real one below goes over the ceiling.
         await chrome.history.addUrl({ url })
       }, lateUrl)
@@ -1292,7 +1332,7 @@ test.describe('rex-browsing — real extension', () => {
     test.beforeEach(async () => {
       await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 5000 })
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
         await chrome.storage.session.remove('rexBrowsingTabNavigation')
       })
     })
@@ -1366,7 +1406,7 @@ test.describe('rex-browsing — real extension', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
         const real = chrome.history.getVisits
-        const visitTime = Date.now()
+        const visitTime = Date.now() - 1000
         chrome.history.getVisits = async () => ([
           { id: '1', visitId: '9001', referringVisitId: '0', visitTime, transition: 'link', isLocal: true }
         ]) as never
@@ -1491,7 +1531,7 @@ test.describe('rex-browsing — real extension', () => {
     async function openFromStart(selector: string, landing: string, config: Record<string, unknown> = {}) {
       await serviceWorker.evaluate((config) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, ...config })
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 0, ...config })
       }, config)
 
       const tab = await context.newPage()
@@ -1788,7 +1828,7 @@ test.describe('rex-browsing — real extension', () => {
     async function visitInternalPage(url: string, config: Record<string, unknown>) {
       await serviceWorker.evaluate((config) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, ...config })
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 0, ...config })
       }, config)
 
       const tab = await context.newPage()
@@ -1984,7 +2024,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('links a visit to a navigation that arrives after it', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 6000
       expect(await captureAt('601', visitTime)).toBe(true)
       expect(await navigate(visitTime)).toBe(true)
 
@@ -1998,7 +2038,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('links a visit to a navigation that arrived before it', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 6000
       await navigate(visitTime - 2000, { tabId: 40 })
       await navigate(visitTime + 1000)
       await captureAt('602', visitTime)
@@ -2009,7 +2049,7 @@ test.describe('rex-browsing — real extension', () => {
     })
 
     test('does not link outside the tolerance or when tolerance is 0', async () => {
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 6000
 
       await setTolerance(5000)
       await navigate(visitTime + 6000)
@@ -2034,7 +2074,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('a visit in one URL open in two tabs takes the newest navigation\'s tab alone', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 6000
       const openTab = await serviceWorker.evaluate(async () => {
         const tabs = await chrome.tabs.query({})
         return { id: tabs[0].id, windowId: tabs[0].windowId }
@@ -2053,7 +2093,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('a navigation in an open tab links its window', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 6000
       const openTab = await serviceWorker.evaluate(async () => {
         const tabs = await chrome.tabs.query({})
         return { id: tabs[0].id, windowId: tabs[0].windowId }
@@ -2070,7 +2110,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('an older navigation arriving after a newer one does not roll the stored link back', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 6000
       await captureAt('607', visitTime)
       await navigate(visitTime + 1000)
       await serviceWorker.evaluate(async () => {
@@ -2100,7 +2140,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('links a visit recorded without ids', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 6000
 
       await serviceWorker.evaluate(async ({ url, visitTime }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2154,6 +2194,41 @@ test.describe('rex-browsing — real extension', () => {
 
       expect(answered).toBe(false)
       expect(await storedNavigations()).toBeUndefined()
+    })
+
+    async function drainedCount(): Promise<number> {
+      return serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (self as any).rexBrowsingPlugin.drain()
+      })
+    }
+
+    test('holds a visit younger than the tolerance until a later drain', async () => {
+      await setTolerance(5000)
+      await captureAt('611', Date.now())
+
+      expect(await drainedCount()).toBe(0)
+
+      await captureAt('611', Date.now() - 6000)
+
+      expect(await drainedCount()).toBe(1)
+    })
+
+    test('a visit whose navigation never arrives is emitted after the tolerance without tab fields', async () => {
+      await setTolerance(5000)
+      await captureAt('612', Date.now() - 6000)
+
+      const visit = await drainedVisit('612')
+
+      expect(visit).toBeDefined()
+      expect(visit).not.toHaveProperty('tab_id')
+    })
+
+    test('a tolerance of 0 emits at once', async () => {
+      await setTolerance(0)
+      await captureAt('613', Date.now())
+
+      expect(await drainedVisit('613')).toBeDefined()
     })
 
     // Chrome stops an idle extension service worker after about 30 seconds, and
@@ -2274,7 +2349,7 @@ test.describe('rex-browsing — real extension', () => {
       }
 
       test('links a visit to a navigation held before a worker restart', async () => {
-        const visitTime = Date.now()
+        const visitTime = Date.now() - 6000
 
         const held = await evaluateInWorker(({ url, visitTime }) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any

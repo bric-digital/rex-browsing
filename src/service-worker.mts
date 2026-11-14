@@ -285,13 +285,14 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       }
 
       const records = await this.visitStore.readAll()
+      const emittable = records.filter((record) => record.visit_time <= now - this.config.tab_link_tolerance_ms)
       const openers = await this.openerStore.readAll()
       const pages = await this.pageStore.readAll()
       const emitted: string[] = []
       const emittedOpeners: string[] = []
       const emittedPages: string[] = []
 
-      for (const record of records) {
+      for (const record of emittable) {
         if (record.ids_unavailable !== undefined) {
           const item = await historyItemFields(record.url, record.visit_time)
           const visit: BrowsingVisitEvent = {
@@ -334,7 +335,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         emitted.push(record.visit_id)
       }
 
-      await this.emitCeilingEvents(records, now)
+      await this.emitCeilingEvents(emittable, now)
 
       // Resolved against the visits read in this same drain, so a redirect chain
       // in the new tab attaches the edge to its root rather than its landing.
