@@ -8,6 +8,14 @@ REX module that records every http and https visit after install, in the same st
 "@bric/rex-browsing": "github:bric-digital/rex-browsing#v3.0.0"
 ```
 
+Import it once in the host extension's service worker, which registers the module with rex-core:
+
+```js
+import '@bric/rex-browsing/service-worker'
+```
+
+The host extension needs the `history` permission, and `storage`, which rex-core already requires. `tabs` is needed only for `tab_opener_edges` and `internal_pages` (see below).
+
 `package.json` on `main` carries a `-dev` version between releases (`3.0.0-dev` means not yet 3.0.0), so the repo never names a release that was not cut. Releases and what the numbers mean: [RELEASING.md](RELEASING.md).
 
 ## Why
@@ -20,7 +28,7 @@ Studies opt in: the module is off until configuration enables it. It does no red
 
 ## What it records
 
-Every http and https visit Chrome reports. Nothing narrows or drops one. The module depends on no other REX module to record; rex-core supplies configuration and the participant identifier.
+Every http and https visit Chrome reports. Nothing narrows one: no list, rule or scope decides what is kept. Two visits to one address are two records, however close together. A visit is lost only when Chrome cannot return it to the lookup that resolves its visit id, for example when the address is deleted from history within milliseconds. Nothing reports such a loss to the server. The module depends on no other REX module to record; rex-core supplies configuration and the participant identifier.
 
 ### `rex-browsing-visit`
 
@@ -60,15 +68,15 @@ A visit is linked to the tab it happened in from a `rex-page-events` url-active 
 - **Before configuration is read.** Visits are held in `chrome.storage.local`, because a visit not captured while it happens cannot be recovered. When configuration arrives, the module keeps them if `enabled` is true and discards them if not.
 - **While disabled.** The default. The module holds no listeners and emits nothing. Anything it holds is discarded.
 - **Before an identifier exists.** Records are held, not emitted, so nothing goes out unattributed. They are emitted once rex-core's `getIdentifier` returns one.
-- **Age.** A record never emitted is discarded after `max_record_age_days`, whether or not the module is enabled or has an identifier.
-- **Emission.** The host sends `triggerBrowsingDrain`. Each record is dispatched, then deleted. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot.
+- **Age.** A record never emitted is discarded at the next drain after it passes `max_record_age_days`, whether or not the module is enabled or has an identifier.
+- **Emission.** The host sends `triggerBrowsingDrain`. Each record is dispatched, then deleted. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot. A visit can also be emitted twice when its tab link lands during a drain: the second copy carries the tab fields. Duplicates share `visit_id`, and the linked copy is the fuller one.
 
 ## Messages
 
 | Message | Direction | Effect |
 |---------|-----------|--------|
 | `triggerBrowsingDrain` | host to module | Emits stored records now. The response is the number of points emitted, or `0` when nothing was emitted (disabled, no identifier, a drain already running, or an error) |
-| `pageUrlActive` | rex-page-events to module | Carries a url-active record for the tab link. The response is `{ "success": true }` once stored |
+| `pageUrlActive` | rex-page-events to module | Carries a url-active record for the tab link. The response is `{ "success": true }` once stored, or `{ "success": false }` when storing fails. A malformed record, or any record while the module is disabled, is ignored and gets no response from this module |
 
 ## Configuration
 
@@ -136,6 +144,7 @@ Behavior changes:
 - Visits are held until configuration and an identifier exist.
 - Records past `max_record_age_days` are discarded in every state.
 - New: tab link fields and `page_events_link_tolerance_ms`.
+- Unsent v2 records under `rexVisitGraphHop:` are not read by v3 and are never emitted. Drain v2 before upgrading.
 
 Removed settings: `capture_scope`, `capture_rules`, `capture_block_lists`, `capture_allow_lists`, `schemes`, `url_detail`, `debug`, `redaction`, `max_hop_age_days`. The last is replaced by `max_record_age_days`. The `capture_rule` field is no longer emitted. Without capture rules, `schemes` and `url_detail`, the module neither narrows what it records nor redacts addresses; redaction belongs to rex-content-processing.
 
