@@ -1772,41 +1772,26 @@ test.describe('rex-browsing — real extension', () => {
   // -------------------------------------------------------------------------
   // Tab link
   //
-  // rex-page-events sends each url-active record to every module as a
-  // pageUrlActive message through rex-core; these send it the same way.
+  // Visits are linked to the tab of a main-frame navigation the module holds.
   // -------------------------------------------------------------------------
 
   test.describe('tab link', () => {
     const LINKED_URL = 'https://www.example.com/linked'
 
-    function urlActive(urlShownAt: number, overrides: Record<string, unknown> = {}) {
-      return {
-        name: 'rex-page-url-active',
-        url: LINKED_URL,
-        url_shown_at: urlShownAt,
-        tab_id: 41,
-        window_id: 7,
-        session_id: 's1',
-        ...overrides
-      }
-    }
-
-    /** Sends a message through rex-core and waits for a module to answer it. */
-    async function announce(event: Record<string, unknown>) {
-      return serviceWorker.evaluate(async (event) => {
-        return new Promise((resolve) => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ;(self as any).rexCorePlugin.handleMessage({ messageType: 'pageUrlActive', event }, null, resolve)
-        })
-      }, event)
-    }
-
-    /** Sends a message through rex-core without waiting for an answer, which a refused message never gets. */
-    async function sendUnanswered(message: Record<string, unknown>) {
-      return serviceWorker.evaluate((message) => {
+    async function setTolerance(toleranceMs: number) {
+      await serviceWorker.evaluate((toleranceMs) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (self as any).rexCorePlugin.handleMessage(message, null, () => {})
-      }, message)
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: toleranceMs })
+      }, toleranceMs)
+    }
+
+    async function navigate(time: number, overrides: Record<string, unknown> = {}): Promise<boolean> {
+      return serviceWorker.evaluate(async ({ time, overrides, url }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (self as any).rexBrowsingPlugin.captureNavigation({
+          tabId: 41, url, frameId: 0, timeStamp: time, ...overrides
+        })
+      }, { time, overrides, url: LINKED_URL })
     }
 
     async function captureAt(visitId: string, visitTime: number) {
@@ -1836,211 +1821,143 @@ test.describe('rex-browsing — real extension', () => {
       }, visitId)
     }
 
-    async function storedUrlActive() {
+    async function storedNavigations() {
       return serviceWorker.evaluate(async () => {
-        return (await chrome.storage.session.get('rexBrowsingUrlActive')).rexBrowsingUrlActive
+        return (await chrome.storage.session.get('rexBrowsingTabNavigation')).rexBrowsingTabNavigation
       })
     }
 
     test.beforeEach(async () => {
       await serviceWorker.evaluate(async () => {
-        await chrome.storage.session.remove('rexBrowsingUrlActive')
+        await chrome.storage.session.remove('rexBrowsingTabNavigation')
       })
     })
 
-    test('links a visit to a url-active record that arrives after it', async () => {
+    test('links a visit to a navigation that arrives after it', async () => {
+      await setTolerance(5000)
       const visitTime = Date.now()
       expect(await captureAt('601', visitTime)).toBe(true)
-      expect(await announce(urlActive(visitTime))).toEqual({ success: true })
+      expect(await navigate(visitTime)).toBe(true)
 
       const visit = await drainedVisit('601')
 
       expect(visit.tab_id).toBe(41)
-      expect(visit.window_id).toBe(7)
-      expect(visit.session_id).toBe('s1')
-      expect(visit.page_events_url_shown_at).toBe(visitTime)
+      expect(visit).not.toHaveProperty('session_id')
+      expect(visit).not.toHaveProperty('page_events_url_shown_at')
+      expect(visit).not.toHaveProperty('navigation_time')
     })
 
-    test('links a visit to a url-active record that arrived before it', async () => {
+    test('links a visit to a navigation that arrived before it', async () => {
+      await setTolerance(5000)
       const visitTime = Date.now()
-      await announce(urlActive(visitTime - 2000, { tab_id: 40 }))
-      await announce(urlActive(visitTime + 1000))
+      await navigate(visitTime - 2000, { tabId: 40 })
+      await navigate(visitTime + 1000)
       await captureAt('602', visitTime)
 
       const visit = await drainedVisit('602')
 
-      // Both are within the tolerance; the newer one wins.
       expect(visit.tab_id).toBe(41)
-      expect(visit.page_events_url_shown_at).toBe(visitTime + 1000)
     })
 
     test('does not link outside the tolerance or when tolerance is 0', async () => {
       const visitTime = Date.now()
 
-      await serviceWorker.evaluate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, page_events_link_tolerance_ms: 1000 })
-      })
-      await announce(urlActive(visitTime + 1500))
+      await setTolerance(5000)
+      await navigate(visitTime + 6000)
       await captureAt('603', visitTime)
       const outside = await drainedVisit('603')
 
       await serviceWorker.evaluate(async () => {
-        await chrome.storage.session.remove('rexBrowsingUrlActive')
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, page_events_link_tolerance_ms: 0 })
+        await chrome.storage.session.remove('rexBrowsingTabNavigation')
       })
-      await announce(urlActive(visitTime))
+      await setTolerance(0)
+      const held = await navigate(visitTime)
       await captureAt('604', visitTime)
-      await captureAt('605', visitTime + 10)
-      await announce(urlActive(visitTime + 10))
-      // One drain emits both, so read both from it.
-      const [before, after] = await serviceWorker.evaluate(async () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const g = self as any
-        g.__capturedEvents = []
-        await g.rexBrowsingPlugin.drain()
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const visits = g.__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return ['604', '605'].map((id) => visits.find((e: any) => e.visit_id === id))
-      })
+      const disabled = await drainedVisit('604')
 
       expect(outside).toBeDefined()
       expect(outside).not.toHaveProperty('tab_id')
-      expect(before).toBeDefined()
-      expect(before).not.toHaveProperty('tab_id')
-      expect(after).toBeDefined()
-      expect(after).not.toHaveProperty('tab_id')
+      expect(held).toBe(false)
+      expect(await storedNavigations()).toBeUndefined()
+      expect(disabled).toBeDefined()
+      expect(disabled).not.toHaveProperty('tab_id')
     })
 
-    test('links a visit from a partial url-active record', async () => {
+    test('a visit in one URL open in two tabs takes the newest navigation\'s tab alone', async () => {
+      await setTolerance(5000)
+      const visitTime = Date.now()
+      const openTab = await serviceWorker.evaluate(async () => {
+        const tabs = await chrome.tabs.query({})
+        return { id: tabs[0].id, windowId: tabs[0].windowId }
+      })
+      const missingTabId = 987654
+
+      await captureAt('605', visitTime)
+      await navigate(visitTime, { tabId: openTab.id })
+      await navigate(visitTime + 50, { tabId: missingTabId })
+
+      const visit = await drainedVisit('605')
+
+      expect(visit.tab_id).toBe(missingTabId)
+      expect(visit).not.toHaveProperty('window_id')
+    })
+
+    test('a navigation in an open tab links its window', async () => {
+      await setTolerance(5000)
+      const visitTime = Date.now()
+      const openTab = await serviceWorker.evaluate(async () => {
+        const tabs = await chrome.tabs.query({})
+        return { id: tabs[0].id, windowId: tabs[0].windowId }
+      })
+
+      await captureAt('606', visitTime)
+      await navigate(visitTime, { tabId: openTab.id })
+
+      const visit = await drainedVisit('606')
+
+      expect(visit.tab_id).toBe(openTab.id)
+      expect(visit.window_id).toBe(openTab.windowId)
+    })
+
+    test('an older navigation arriving after a newer one does not roll the stored link back', async () => {
+      await setTolerance(5000)
       const visitTime = Date.now()
       await captureAt('607', visitTime)
-      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime })
+      await navigate(visitTime + 1000)
+      await serviceWorker.evaluate(async () => {
+        await chrome.storage.session.remove('rexBrowsingTabNavigation')
+      })
+      await navigate(visitTime - 1000, { tabId: 43 })
 
       const visit = await drainedVisit('607')
 
-      expect(visit.page_events_url_shown_at).toBe(visitTime)
-      expect(visit).not.toHaveProperty('tab_id')
-      expect(visit).not.toHaveProperty('window_id')
-      expect(visit).not.toHaveProperty('session_id')
-    })
-
-    test('a newer record with only a tab id takes that tab alone and brings no fields from another tab', async () => {
-      const visitTime = Date.now()
-      await captureAt('608', visitTime)
-      await announce(urlActive(visitTime))
-      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime + 50, tab_id: 42 })
-
-      const visit = await drainedVisit('608')
-
-      expect(visit.page_events_url_shown_at).toBe(visitTime + 50)
-      expect(visit.tab_id).toBe(42)
-      expect(visit).not.toHaveProperty('window_id')
-      expect(visit).not.toHaveProperty('session_id')
-    })
-
-    test('a visit arriving after several held records takes the tab of the newest record that has one', async () => {
-      const visitTime = Date.now()
-      await announce(urlActive(visitTime))
-      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime + 50, tab_id: 42 })
-      await captureAt('609', visitTime)
-
-      const visit = await drainedVisit('609')
-
-      expect(visit.page_events_url_shown_at).toBe(visitTime + 50)
-      expect(visit.tab_id).toBe(42)
-      expect(visit).not.toHaveProperty('window_id')
-      expect(visit).not.toHaveProperty('session_id')
-    })
-
-    test('an older record arriving after a newer one was evicted does not roll the stored link back', async () => {
-      const visitTime = Date.now()
-      await captureAt('611', visitTime)
-      await announce(urlActive(visitTime + 1000))
-      await serviceWorker.evaluate(async () => {
-        await chrome.storage.session.remove('rexBrowsingUrlActive')
-      })
-      await announce(urlActive(visitTime - 1000, { window_id: 9, session_id: 'older' }))
-
-      const visit = await drainedVisit('611')
-
-      expect(visit.page_events_url_shown_at).toBe(visitTime + 1000)
       expect(visit.tab_id).toBe(41)
-      expect(visit.window_id).toBe(7)
-      expect(visit.session_id).toBe('s1')
     })
 
-    test('attachLink merges onto the stored link instead of replacing it', async () => {
-      const visitTime = Date.now()
-      await captureAt('612', visitTime)
-      await serviceWorker.evaluate(async (visitTime) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const store = (self as any).rexBrowsingPlugin.visitStore
-        await store.attachLink('612', { tab_id: 41, window_id: 7, session_id: 's1', page_events_url_shown_at: visitTime })
-        await store.attachLink('612', { tab_id: 41, window_id: 9, page_events_url_shown_at: visitTime + 5 })
-      }, visitTime)
+    test('ignores subframe and prerender navigations', async () => {
+      await setTolerance(5000)
 
-      const visit = await drainedVisit('612')
-
-      expect(visit.page_events_url_shown_at).toBe(visitTime + 5)
-      expect(visit.tab_id).toBe(41)
-      expect(visit.window_id).toBe(9)
-      expect(visit.session_id).toBe('s1')
+      expect(await navigate(Date.now(), { frameId: 1 })).toBe(false)
+      expect(await navigate(Date.now(), { tabId: -1 })).toBe(false)
+      expect(await storedNavigations()).toBeUndefined()
     })
 
-    test('tab, window and session of a linked visit all come from one tab', async () => {
-      const visitTime = Date.now()
-      await captureAt('613', visitTime)
-      await announce(urlActive(visitTime))
-      await announce(urlActive(visitTime + 10, { tab_id: 42, window_id: 8, session_id: 's2' }))
-      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime + 20, session_id: 'other' })
+    test('ignores non-http navigations', async () => {
+      await setTolerance(5000)
 
-      const visit = await drainedVisit('613')
-
-      expect(visit.tab_id).toBe(42)
-      expect(visit.window_id).toBe(8)
-      expect(visit.session_id).toBe('s2')
-      expect(visit.page_events_url_shown_at).toBe(visitTime + 20)
-    })
-
-    test('copies a tab field only when it has the right type', async () => {
-      const visitTime = Date.now()
-      await captureAt('610', visitTime)
-      await announce(urlActive(visitTime, { tab_id: null, window_id: '7', session_id: 3 }))
-      // Outside the tolerance of the first, so each record matches one visit.
-      await captureAt('611', visitTime + 20_000)
-      await announce(urlActive(visitTime + 20_000, { tab_id: '41' }))
-
-      const [nulled, stringed] = await serviceWorker.evaluate(async () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const g = self as any
-        g.__capturedEvents = []
-        await g.rexBrowsingPlugin.drain()
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const visits = g.__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return ['610', '611'].map((id) => visits.find((e: any) => e.visit_id === id))
-      })
-
-      expect(nulled.page_events_url_shown_at).toBe(visitTime)
-      expect(nulled).not.toHaveProperty('tab_id')
-      expect(nulled).not.toHaveProperty('window_id')
-      expect(nulled).not.toHaveProperty('session_id')
-      expect(stringed.page_events_url_shown_at).toBe(visitTime + 20_000)
-      expect(stringed).not.toHaveProperty('tab_id')
-      expect(stringed.window_id).toBe(7)
+      expect(await navigate(Date.now(), { url: 'chrome://newtab/' })).toBe(false)
+      expect(await storedNavigations()).toBeUndefined()
     })
 
     test('links a visit recorded without ids', async () => {
+      await setTolerance(5000)
       const visitTime = Date.now()
 
       await serviceWorker.evaluate(async ({ url, visitTime }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (self as any).rexBrowsingPlugin.visitStore.recordWithoutIds(url, '', visitTime, 'over_ceiling')
       }, { url: LINKED_URL, visitTime })
-      await announce(urlActive(visitTime))
+      await navigate(visitTime)
 
       const visit = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2055,46 +1972,43 @@ test.describe('rex-browsing — real extension', () => {
       expect(visit).not.toHaveProperty('visit_id')
     })
 
-    test('ignores a malformed pageUrlActive and still records visits', async () => {
-      const visitTime = Date.now()
-
-      await sendUnanswered({ messageType: 'pageUrlActive' })
-      await sendUnanswered({ messageType: 'pageUrlActive', event: urlActive(visitTime, { url: 42 }) })
-      await sendUnanswered({ messageType: 'pageUrlActive', event: urlActive(visitTime, { url_shown_at: undefined }) })
-      await captureAt('606', visitTime)
-
-      const visit = await drainedVisit('606')
-
-      expect(visit).toBeDefined()
-      expect(visit).not.toHaveProperty('tab_id')
-      expect(await storedUrlActive()).toBeUndefined()
-    })
-
-    test('a disabled module ignores pageUrlActive', async () => {
+    test('a disabled module ignores navigations', async () => {
       await serviceWorker.evaluate(() => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: false })
       })
 
-      await sendUnanswered({ messageType: 'pageUrlActive', event: urlActive(Date.now()) })
-
-      expect(await storedUrlActive()).toBeUndefined()
+      expect(await navigate(Date.now())).toBe(false)
+      expect(await storedNavigations()).toBeUndefined()
     })
 
-    test('holds no url-active record before configuration arrives', async () => {
-      const answered = await serviceWorker.evaluate(async (event) => {
+    test('holds no navigation before configuration arrives', async () => {
+      const held = await serviceWorker.evaluate(async ({ url }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
         g.rexBrowsingPlugin.simulateBeforeConfiguration()
+        return g.rexBrowsingPlugin.captureNavigation({ tabId: 41, url, frameId: 0, timeStamp: Date.now() })
+      }, { url: LINKED_URL })
+
+      expect(held).toBe(false)
+      expect(await storedNavigations()).toBeUndefined()
+    })
+
+    test('pageUrlActive is not claimed', async () => {
+      const answered = await serviceWorker.evaluate(async ({ url }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        const event = { name: 'rex-page-url-active', url, url_shown_at: Date.now(), tab_id: 41 }
+        g.rexCorePlugin.handleMessage({ messageType: 'pageUrlActive', event }, null, () => {})
         return g.rexBrowsingPlugin.handleMessage({ messageType: 'pageUrlActive', event }, null, () => undefined)
-      }, urlActive(Date.now()))
+      }, { url: LINKED_URL })
 
       expect(answered).toBe(false)
-      expect(await storedUrlActive()).toBeUndefined()
+      expect(await storedNavigations()).toBeUndefined()
     })
 
     // Chrome stops an idle extension service worker after about 30 seconds, and
-    // a host drains on its own cadence, so a url-active record can arrive in one
+    // a host drains on its own cadence, so a navigation can arrive in one
     // worker and its visit in the next. Run in a browser of its own, because
     // Playwright loses the extension worker once Chrome restarts it.
     test.describe('across a worker restart', () => {
@@ -2210,15 +2124,14 @@ test.describe('rex-browsing — real extension', () => {
         }), { timeout: 5000 }).toBe(true)
       }
 
-      test('links a visit to a url-active record that arrived before a worker restart', async () => {
+      test('links a visit to a navigation held before a worker restart', async () => {
         const visitTime = Date.now()
-        const event = urlActive(visitTime)
 
-        const answer = await evaluateInWorker((event) => new Promise((resolve) => {
+        const held = await evaluateInWorker(({ url, visitTime }) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ;(self as any).rexCorePlugin.handleMessage({ messageType: 'pageUrlActive', event }, null, resolve)
-        }), event)
-        expect(answer).toEqual({ success: true })
+          return (self as any).rexBrowsingPlugin.captureNavigation({ tabId: 41, url, frameId: 0, timeStamp: visitTime })
+        }, { url: LINKED_URL, visitTime })
+        expect(held).toBe(true)
 
         await restartServiceWorker()
 
@@ -2242,7 +2155,6 @@ test.describe('rex-browsing — real extension', () => {
 
         expect(visit).toBeDefined()
         expect(visit?.tab_id).toBe(41)
-        expect(visit?.session_id).toBe('s1')
       })
     })
   })

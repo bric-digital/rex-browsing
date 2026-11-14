@@ -16,16 +16,18 @@
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
 import { isRecordedScheme, newestVisit } from './visit-lookup.mjs'
 import type { RexVisitRecord } from '@bric/rex-types/types'
-import { VisitStore, storageIdOf, type IdsUnavailable, type TabLink, type VisitRecord } from './visit-store.mjs'
+import { VisitStore, storageIdOf, type IdsUnavailable, type VisitRecord } from './visit-store.mjs'
 import { historyItemFields, registeredDomain } from './history-item.mjs'
 import { OpenerStore, TabOpenerTracker, chainRoot } from './tab-opener.mjs'
 import { InternalPageRecorder, PageStore } from './internal-pages.mjs'
-import { TabLinker, isUrlActiveRecord } from './tab-link.mjs'
+import { TabLinker } from './tab-link.mjs'
 
 type HistoryCounts = 'last_visit_time' | 'visit_count' | 'typed_count'
 
 /** The emitted visit: the shared record plus what only rex-browsing adds. */
-interface BrowsingVisitEvent extends Omit<RexVisitRecord, HistoryCounts>, Partial<TabLink> {
+interface BrowsingVisitEvent extends Omit<RexVisitRecord, HistoryCounts> {
+  tab_id?: number;
+  window_id?: number;
   [key: string]: unknown;
   name: 'rex-browsing-visit';
   ids_unavailable?: IdsUnavailable;
@@ -36,8 +38,8 @@ interface BrowsingVisitEvent extends Omit<RexVisitRecord, HistoryCounts>, Partia
 
 export interface BrowsingConfig {
   enabled: boolean;
-  /** Match window for linking a visit to a url-active record. 0 disables linking. */
-  page_events_link_tolerance_ms: number;
+  /** Match window for linking a visit to a tab navigation. 0 disables linking. */
+  tab_link_tolerance_ms: number;
   /**
    * Whether a new tab's first visit is attributed to the page that opened it.
    * Chrome records no referrer across a tab boundary; see tab-opener.mts.
@@ -61,7 +63,7 @@ const CONFIGURATION_TIMEOUT_MS = 10000
 
 const DEFAULT_CONFIG: BrowsingConfig = {
   enabled: false,
-  page_events_link_tolerance_ms: 5000,
+  tab_link_tolerance_ms: 5000,
   tab_opener_edges: true,
   // Chrome keeps about 90 days of history, and 100 visits a day for 90 days is
   // 9,000, so 10,000 is above any human browsing while a page re-recording a
@@ -72,9 +74,18 @@ const DEFAULT_CONFIG: BrowsingConfig = {
   max_record_age_days: 7
 }
 
+function tabFields(record: VisitRecord): { tab_id?: number, window_id?: number } {
+  return record.link === undefined
+    ? {}
+    : {
+      tab_id: record.link.tab_id,
+      ...(record.link.window_id === undefined ? {} : { window_id: record.link.window_id })
+    }
+}
+
 class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   readonly visitStore = new VisitStore()
-  readonly tabLinker = new TabLinker(this.visitStore, () => this.config.page_events_link_tolerance_ms)
+  readonly tabLinker = new TabLinker(this.visitStore, () => this.config.tab_link_tolerance_ms)
   readonly openerStore = new OpenerStore()
   readonly tabOpeners = new TabOpenerTracker({
     store: this.openerStore,
@@ -118,9 +129,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         enabled: 'Boolean, default false. True if module is active, false otherwise. When false nothing is '
           + 'captured, nothing is emitted even if a host asks, and anything already captured is discarded. '
           + 'Visits that happen before configuration arrives are not recorded.',
-        page_events_link_tolerance_ms: 'Number, default 5000. A visit is linked to the tab it happened in '
-          + 'from a rex-page-events url-active record with the same URL shown within this many '
-          + 'milliseconds of the visit; the newest such record wins. 0 disables linking.',
+        tab_link_tolerance_ms: 'Number, default 5000. A visit is linked to the tab it happened in '
+          + 'from a main-frame navigation to the same URL within this many milliseconds of the visit; '
+          + 'the newest such navigation wins. Emits tab_id and window_id. 0 disables linking.',
         tab_opener_edges: 'Boolean, default true. Attributes the first visit in a new tab to the page '
           + 'that opened it, emitted as rex-browsing-opener points. Chrome records no referrer across '
           + 'a tab boundary, so without this a result opened in a new tab arrives from nowhere. Needs the '
@@ -200,6 +211,36 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     return this.internalPages.pageCommitted(tabId, url)
   }
 
+  /**
+   * A main-frame navigation a tab committed. Held until a visit to the same
+   * URL near its time is, or has been, recorded.
+   */
+  async captureNavigation(details: { tabId: number, url: string, frameId: number, timeStamp: number }): Promise<boolean> {
+    if (!this.isAccepting() || this.config.tab_link_tolerance_ms <= 0 || details.frameId !== 0
+      || details.tabId < 0 || !isRecordedScheme(details.url)) {
+      return false
+    }
+
+    const windowId = await this.windowOf(details.tabId)
+
+    await this.tabLinker.acceptNavigation({
+      url: details.url,
+      tab_id: details.tabId,
+      ...(windowId === undefined ? {} : { window_id: windowId }),
+      time: details.timeStamp
+    })
+
+    return true
+  }
+
+  private async windowOf(tabId: number): Promise<number | undefined> {
+    try {
+      return (await chrome.tabs.get(tabId)).windowId
+    } catch {
+      return undefined
+    }
+  }
+
   private isAccepting(): boolean {
     return this.configured && this.config.enabled
   }
@@ -259,7 +300,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
             domain: registeredDomain(record.url),
             ids_unavailable: record.ids_unavailable,
             ...(item ?? { title: record.title }),
-            ...(record.link ?? {})
+            ...tabFields(record)
           }
 
           dispatchEvent(visit)
@@ -283,7 +324,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
           visit_id: record.visit_id,
           referring_visit_id: record.referring_visit_id,
           ...(item ?? { title: '' }),
-          ...(record.link ?? {})
+          ...tabFields(record)
         }
 
         dispatchEvent(visit)
@@ -385,18 +426,13 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   /**
    * `triggerBrowsingDrain` emits any stored records now and responds with the
    * count, so a host extension can drain on its own cadence rather than waiting
-   * for the alarm. `pageUrlActive` carries a rex-page-events url-active record,
-   * which links visits to the tab they happened in.
+   * for the alarm.
    */
   override handleMessage(
     message: { messageType?: string, event?: unknown } | undefined,
     _sender: unknown,
     sendResponse: (response: unknown) => void
   ): boolean {
-    if (message?.messageType === 'pageUrlActive') {
-      return this.handleUrlActive(message.event, sendResponse)
-    }
-
     if (message?.messageType !== 'triggerBrowsingDrain') {
       return false
     }
@@ -404,26 +440,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.drain()
       .then((count) => sendResponse(count))
       .catch(() => sendResponse(0))
-
-    return true
-  }
-
-  private handleUrlActive(event: unknown, sendResponse: (response: unknown) => void): boolean {
-    if (!this.isAccepting()) {
-      return false
-    }
-
-    if (!isUrlActiveRecord(event)) {
-      console.warn('[rex-browsing] Ignoring malformed pageUrlActive record:', event)
-      return false
-    }
-
-    this.tabLinker.acceptUrlActive(event)
-      .then(() => sendResponse({ success: true }))
-      .catch((error) => {
-        console.error('[rex-browsing] Url-active record failed:', error)
-        sendResponse({ success: false })
-      })
 
     return true
   }

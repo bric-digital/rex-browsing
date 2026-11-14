@@ -11,12 +11,14 @@ import { EdgeStore, type StoredRecord } from './edge-store.mjs'
 
 const KEY_PREFIX = 'rexBrowsingVisit:'
 
-/** The tab a visit happened in, from rex-page-events. */
+/**
+ * The tab a visit happened in. `navigation_time` is the time of the navigation
+ * it came from; it decides which link is newest and is never emitted.
+ */
 export interface TabLink {
-  tab_id?: number;
+  tab_id: number;
   window_id?: number;
-  session_id?: string;
-  page_events_url_shown_at: number;
+  navigation_time: number;
 }
 
 /** Why a visit was recorded without its visit ids. */
@@ -104,18 +106,15 @@ export class VisitStore extends EdgeStore<VisitRecord> {
   }
 
   /**
-   * Adds the tab link to a stored visit, over any link it already has: fields
-   * present on the new link win, absent ones keep their stored values. A link
-   * for a different tab replaces the stored one, so ids of two tabs never
-   * combine. Does nothing when the visit is not held.
+   * Sets the tab link of a stored visit. A stored link from a newer navigation
+   * is kept; otherwise the new link replaces it whole, so fields of two tabs
+   * never combine. Does nothing when the visit is not held.
    */
   async attachLink(storageId: string, link: TabLink): Promise<void> {
     const record = await this.read(storageId)
 
-    if (record !== undefined) {
-      const sameTab = link.tab_id === undefined || link.tab_id === record.link?.tab_id
-
-      await this.put({ ...record, link: sameTab ? { ...record.link, ...link } : link })
+    if (record !== undefined && !(record.link !== undefined && record.link.navigation_time > link.navigation_time)) {
+      await this.put({ ...record, link })
     }
   }
 }
