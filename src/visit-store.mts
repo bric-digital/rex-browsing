@@ -32,15 +32,18 @@ export class VisitStore extends EdgeStore<VisitRecord> {
     super(KEY_PREFIX, (record) => record.visit_id)
   }
 
-  async record(visit: BrowsingVisit): Promise<void> {
-    await this.put({
+  async record(visit: BrowsingVisit): Promise<VisitRecord> {
+    const record: VisitRecord = {
       visit_id: visit.visitId,
       referring_visit_id: visit.referringVisitId,
       visit_time: visit.visitTime,
       transition_type: visit.transition,
       is_local: visit.isLocal,
       url: visit.url
-    })
+    }
+
+    await this.put(record)
+    return record
   }
 
   /** Adds the tab link to a stored visit. Does nothing when the visit is not held. */

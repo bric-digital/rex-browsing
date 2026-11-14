@@ -19,9 +19,12 @@ import { VisitStore } from './visit-store.mjs'
 import { historyItemFields, registeredDomain } from './history-item.mjs'
 import { OpenerStore, TabOpenerTracker, chainRoot } from './tab-opener.mjs'
 import { InternalPageRecorder, PageStore } from './internal-pages.mjs'
+import { TabLinker, isUrlActiveRecord } from './tab-link.mjs'
 
 export interface BrowsingConfig {
   enabled: boolean;
+  /** Match window for linking a visit to a url-active record. 0 disables linking. */
+  page_events_link_tolerance_ms: number;
   /**
    * Whether a new tab's first visit is attributed to the page that opened it.
    * Chrome records no referrer across a tab boundary; see tab-opener.mts.
@@ -43,6 +46,7 @@ export interface BrowsingConfig {
 
 const DEFAULT_CONFIG: BrowsingConfig = {
   enabled: false,
+  page_events_link_tolerance_ms: 5000,
   tab_opener_edges: true,
   // Chosen from the measured cost, which scales with the count: 440,000 visits
   // resolve in ~1075ms, so ~2.4us each, and 25,000 is about 60ms. Above any
@@ -56,6 +60,7 @@ const DEFAULT_CONFIG: BrowsingConfig = {
 
 class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   readonly visitStore = new VisitStore()
+  readonly tabLinker = new TabLinker(this.visitStore, () => this.config.page_events_link_tolerance_ms)
   readonly openerStore = new OpenerStore()
   readonly tabOpeners = new TabOpenerTracker({
     store: this.openerStore,
@@ -99,6 +104,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         enabled: 'Boolean, default false. True if module is active, false otherwise. When false nothing is '
           + 'captured, nothing is emitted even if a host asks, and anything already captured is discarded. '
           + 'Visits that happen before configuration is read are held, then kept or discarded by this flag.',
+        page_events_link_tolerance_ms: 'Number, default 5000. A visit is linked to the tab it happened in '
+          + 'from a rex-page-events url-active record with the same URL shown within this many '
+          + 'milliseconds of the visit; the newest such record wins. 0 disables linking.',
         tab_opener_edges: 'Boolean, default true. Attributes the first visit in a new tab to the page '
           + 'that opened it, emitted as rex-browsing-opener points. Chrome records no referrer across '
           + 'a tab boundary, so without this a result opened in a new tab arrives from nowhere. Needs the '
@@ -137,7 +145,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       return false
     }
 
-    await this.visitStore.record(visit)
+    await this.tabLinker.linkVisit(await this.visitStore.record(visit))
     return true
   }
 
@@ -282,13 +290,18 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   /**
    * `triggerBrowsingDrain` emits any stored records now and responds with the
    * count, so a host extension can drain on its own cadence rather than waiting
-   * for the alarm.
+   * for the alarm. `pageUrlActive` carries a rex-page-events url-active record,
+   * which links visits to the tab they happened in.
    */
   override handleMessage(
-    message: { messageType?: string } | undefined,
+    message: { messageType?: string, event?: unknown } | undefined,
     _sender: unknown,
     sendResponse: (response: unknown) => void
   ): boolean {
+    if (message?.messageType === 'pageUrlActive') {
+      return this.handleUrlActive(message.event, sendResponse)
+    }
+
     if (message?.messageType !== 'triggerBrowsingDrain') {
       return false
     }
@@ -296,6 +309,26 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.drain()
       .then((count) => sendResponse(count))
       .catch(() => sendResponse(0))
+
+    return true
+  }
+
+  private handleUrlActive(event: unknown, sendResponse: (response: unknown) => void): boolean {
+    if (!this.isAccepting()) {
+      return false
+    }
+
+    if (!isUrlActiveRecord(event)) {
+      console.warn('[rex-browsing] Ignoring malformed pageUrlActive record:', event)
+      return false
+    }
+
+    this.tabLinker.acceptUrlActive(event)
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => {
+        console.error('[rex-browsing] Url-active record failed:', error)
+        sendResponse({ success: false })
+      })
 
     return true
   }
@@ -437,6 +470,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     if (!this.config.enabled) {
       const discarded = await this.visitStore.clear() + await this.openerStore.clear()
         + await this.pageStore.clear()
+      await this.tabLinker.clear()
 
       if (discarded > 0) {
         console.log(`[rex-browsing] Disabled; discarded ${discarded} edge(s) captured before configuration.`)

@@ -1417,4 +1417,345 @@ test.describe('rex-browsing — real extension', () => {
       expect(remaining).toEqual({ beforeDisable: 1, afterDisable: 0 })
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Tab link
+  //
+  // rex-page-events sends each url-active record to every module as a
+  // pageUrlActive message through rex-core; these send it the same way.
+  // -------------------------------------------------------------------------
+
+  test.describe('tab link', () => {
+    const LINKED_URL = 'https://www.example.com/linked'
+
+    function urlActive(urlShownAt: number, overrides: Record<string, unknown> = {}) {
+      return {
+        name: 'rex-page-url-active',
+        url: LINKED_URL,
+        url_shown_at: urlShownAt,
+        tab_id: 41,
+        window_id: 7,
+        session_id: 's1',
+        ...overrides
+      }
+    }
+
+    /** Sends a message through rex-core and waits for a module to answer it. */
+    async function announce(event: Record<string, unknown>) {
+      return serviceWorker.evaluate(async (event) => {
+        return new Promise((resolve) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(self as any).rexCorePlugin.handleMessage({ messageType: 'pageUrlActive', event }, null, resolve)
+        })
+      }, event)
+    }
+
+    /** Sends a message through rex-core without waiting for an answer, which a refused message never gets. */
+    async function sendUnanswered(message: Record<string, unknown>) {
+      return serviceWorker.evaluate((message) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (self as any).rexCorePlugin.handleMessage(message, null, () => {})
+      }, message)
+    }
+
+    async function captureAt(visitId: string, visitTime: number) {
+      return serviceWorker.evaluate(async ({ url, visitId, visitTime }) => {
+        const real = chrome.history.getVisits
+        chrome.history.getVisits = async () => ([
+          { id: '1', visitId, referringVisitId: '0', visitTime, transition: 'link', isLocal: true }
+        ]) as never
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return await (self as any).rexBrowsingPlugin.captureVisit({ id: '1', url })
+        } finally {
+          chrome.history.getVisits = real
+        }
+      }, { url: LINKED_URL, visitId, visitTime })
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async function drainedVisit(visitId: string): Promise<any> {
+      return serviceWorker.evaluate(async (visitId) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return g.__capturedEvents.find((e: any) => e.name === 'rex-browsing-visit' && e.visit_id === visitId)
+      }, visitId)
+    }
+
+    async function storedUrlActive() {
+      return serviceWorker.evaluate(async () => {
+        return (await chrome.storage.session.get('rexBrowsingUrlActive')).rexBrowsingUrlActive
+      })
+    }
+
+    test.beforeEach(async () => {
+      await serviceWorker.evaluate(async () => {
+        await chrome.storage.session.remove('rexBrowsingUrlActive')
+      })
+    })
+
+    test('links a visit to a url-active record that arrives after it', async () => {
+      const visitTime = Date.now()
+      expect(await captureAt('601', visitTime)).toBe(true)
+      expect(await announce(urlActive(visitTime))).toEqual({ success: true })
+
+      const visit = await drainedVisit('601')
+
+      expect(visit.tab_id).toBe(41)
+      expect(visit.window_id).toBe(7)
+      expect(visit.session_id).toBe('s1')
+      expect(visit.page_events_url_shown_at).toBe(visitTime)
+    })
+
+    test('links a visit to a url-active record that arrived before it', async () => {
+      const visitTime = Date.now()
+      await announce(urlActive(visitTime - 2000, { tab_id: 40 }))
+      await announce(urlActive(visitTime + 1000))
+      await captureAt('602', visitTime)
+
+      const visit = await drainedVisit('602')
+
+      // Both are within the tolerance; the newer one wins.
+      expect(visit.tab_id).toBe(41)
+      expect(visit.page_events_url_shown_at).toBe(visitTime + 1000)
+    })
+
+    test('does not link outside the tolerance or when tolerance is 0', async () => {
+      const visitTime = Date.now()
+
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, page_events_link_tolerance_ms: 1000 })
+      })
+      await announce(urlActive(visitTime + 1500))
+      await captureAt('603', visitTime)
+      const outside = await drainedVisit('603')
+
+      await serviceWorker.evaluate(async () => {
+        await chrome.storage.session.remove('rexBrowsingUrlActive')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, page_events_link_tolerance_ms: 0 })
+      })
+      await announce(urlActive(visitTime))
+      await captureAt('604', visitTime)
+      await captureAt('605', visitTime + 10)
+      await announce(urlActive(visitTime + 10))
+      // One drain emits both, so read both from it.
+      const [before, after] = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const visits = g.__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return ['604', '605'].map((id) => visits.find((e: any) => e.visit_id === id))
+      })
+
+      expect(outside).toBeDefined()
+      expect(outside).not.toHaveProperty('tab_id')
+      expect(before).toBeDefined()
+      expect(before).not.toHaveProperty('tab_id')
+      expect(after).toBeDefined()
+      expect(after).not.toHaveProperty('tab_id')
+    })
+
+    test('ignores a malformed pageUrlActive and still records visits', async () => {
+      const visitTime = Date.now()
+
+      await sendUnanswered({ messageType: 'pageUrlActive' })
+      await sendUnanswered({ messageType: 'pageUrlActive', event: urlActive(visitTime, { url: 42 }) })
+      await captureAt('606', visitTime)
+
+      const visit = await drainedVisit('606')
+
+      expect(visit).toBeDefined()
+      expect(visit).not.toHaveProperty('tab_id')
+      expect(await storedUrlActive()).toBeUndefined()
+    })
+
+    test('a disabled module ignores pageUrlActive', async () => {
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: false })
+      })
+
+      await sendUnanswered({ messageType: 'pageUrlActive', event: urlActive(Date.now()) })
+
+      expect(await storedUrlActive()).toBeUndefined()
+    })
+
+    test('a configuration that disables the module discards url-active records held before it', async () => {
+      const held = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.simulateBeforeConfiguration()
+      }).then(() => announce(urlActive(Date.now())))
+        .then(() => storedUrlActive())
+
+      await serviceWorker.evaluate(async () => {
+        await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (self as any).rexBrowsingPlugin.refreshConfiguration()
+      })
+
+      expect(held).toHaveLength(1)
+      expect(await storedUrlActive()).toBeUndefined()
+    })
+
+    // Chrome stops an idle extension service worker after about 30 seconds, and
+    // a host drains on its own cadence, so a url-active record can arrive in one
+    // worker and its visit in the next. Run in a browser of its own, because
+    // Playwright loses the extension worker once Chrome restarts it.
+    test.describe('across a worker restart', () => {
+      let restartContext: BrowserContext
+      let restartUserDataDir: string
+      let extensionOrigin: string
+
+      test.beforeAll(async () => {
+        const extensionPath = path.join(__dirname, '../extension')
+        restartUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-browsing-restart-'))
+        restartContext = await chromium.launchPersistentContext(restartUserDataDir, {
+          headless: false,
+          args: [
+            `--disable-extensions-except=${extensionPath}`,
+            `--load-extension=${extensionPath}`,
+            '--window-position=-3000,-3000',
+            '--window-size=800,600'
+          ]
+        })
+
+        const worker = restartContext.serviceWorkers()[0]
+          ?? await restartContext.waitForEvent('serviceworker', { timeout: 30_000 })
+        extensionOrigin = `chrome-extension://${new URL(worker.url()).host}`
+
+        await worker.evaluate(async () => {
+          await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const g = self as any
+          await g.rexBrowsingPlugin.refreshConfiguration()
+          await new Promise((resolve) => {
+            g.rexCorePlugin.handleMessage({ messageType: 'setIdentifier', identifier: 'restart-participant' }, null, resolve)
+          })
+        })
+      })
+
+      test.afterAll(async () => {
+        await restartContext?.close()
+        if (restartUserDataDir) {
+          fs.rmSync(restartUserDataDir, { recursive: true, force: true })
+        }
+      })
+
+      async function workerCount(): Promise<number> {
+        const page = restartContext.pages()[0] ?? await restartContext.newPage()
+        const cdp = await restartContext.newCDPSession(page)
+        const { targetInfos } = await cdp.send('Target.getTargets')
+        await cdp.detach()
+        return targetInfos.filter((target: { type: string }) => target.type === 'service_worker').length
+      }
+
+      /** Evaluates in the extension worker through CDP, which still reaches a worker Chrome restarted. */
+      async function evaluateInWorker<T>(pageFunction: (arg: T) => unknown, arg?: T): Promise<unknown> {
+        const page = restartContext.pages()[0] ?? await restartContext.newPage()
+        const cdp = await restartContext.newCDPSession(page)
+        try {
+          const { targetInfos } = await cdp.send('Target.getTargets')
+          const target = targetInfos.find((info: { type: string }) => info.type === 'service_worker')
+          if (target === undefined) {
+            throw new Error('No extension service worker is running')
+          }
+          const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: false })
+
+          const answer = new Promise<unknown>((resolve, reject) => {
+            cdp.on('Target.receivedMessageFromTarget', (event) => {
+              if (event.sessionId !== sessionId) return
+              const message = JSON.parse(event.message)
+              if (message.id !== 1) return
+              if (message.result?.exceptionDetails) {
+                reject(new Error(message.result.exceptionDetails.exception?.description ?? 'evaluation failed'))
+              } else {
+                resolve(message.result?.result?.value)
+              }
+            })
+          })
+
+          await cdp.send('Target.sendMessageToTarget', {
+            sessionId,
+            message: JSON.stringify({
+              id: 1,
+              method: 'Runtime.evaluate',
+              params: {
+                expression: `(${pageFunction.toString()})(${JSON.stringify(arg)})`,
+                returnByValue: true,
+                awaitPromise: true
+              }
+            })
+          })
+
+          return await answer
+        } finally {
+          await cdp.detach()
+        }
+      }
+
+      async function restartServiceWorker(): Promise<void> {
+        const page = restartContext.pages()[0] ?? await restartContext.newPage()
+        const cdp = await restartContext.newCDPSession(page)
+        await cdp.send('ServiceWorker.enable')
+        await cdp.send('ServiceWorker.stopAllWorkers')
+        await cdp.detach()
+        await expect.poll(workerCount, { timeout: 5000 }).toBe(0)
+
+        const waker = await restartContext.newPage()
+        await waker.goto(`${extensionOrigin}/manifest.json`)
+        await waker.evaluate(() => chrome.runtime.sendMessage({ messageType: 'getIdentifier' }))
+        await waker.close()
+        await expect.poll(workerCount, { timeout: 5000 }).toBe(1)
+
+        // The restarted worker reads configuration again in setup().
+        await expect.poll(() => evaluateInWorker(() => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return (self as any).rexBrowsingPlugin?.currentConfig().enabled === true
+        }), { timeout: 5000 }).toBe(true)
+      }
+
+      test('links a visit to a url-active record that arrived before a worker restart', async () => {
+        const visitTime = Date.now()
+        const event = urlActive(visitTime)
+
+        const answer = await evaluateInWorker((event) => new Promise((resolve) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(self as any).rexCorePlugin.handleMessage({ messageType: 'pageUrlActive', event }, null, resolve)
+        }), event)
+        expect(answer).toEqual({ success: true })
+
+        await restartServiceWorker()
+
+        const visit = await evaluateInWorker(async ({ url, visitTime }) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const g = self as any
+          const real = chrome.history.getVisits
+          chrome.history.getVisits = async () => ([
+            { id: '1', visitId: '701', referringVisitId: '0', visitTime, transition: 'link', isLocal: true }
+          ]) as never
+          try {
+            await g.rexBrowsingPlugin.captureVisit({ id: '1', url })
+          } finally {
+            chrome.history.getVisits = real
+          }
+          g.__capturedEvents = []
+          await g.rexBrowsingPlugin.drain()
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return g.__capturedEvents.find((e: any) => e.name === 'rex-browsing-visit' && e.visit_id === '701')
+        }, { url: LINKED_URL, visitTime }) as Record<string, unknown> | undefined
+
+        expect(visit).toBeDefined()
+        expect(visit?.tab_id).toBe(41)
+        expect(visit?.session_id).toBe('s1')
+      })
+    })
+  })
 })
