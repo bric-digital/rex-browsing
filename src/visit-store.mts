@@ -13,9 +13,9 @@ const KEY_PREFIX = 'rexBrowsingVisit:'
 
 /** The tab a visit happened in, from rex-page-events. */
 export interface TabLink {
-  tab_id: number;
-  window_id: number;
-  session_id: string;
+  tab_id?: number;
+  window_id?: number;
+  session_id?: string;
   page_events_url_shown_at: number;
 }
 

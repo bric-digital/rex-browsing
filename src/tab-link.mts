@@ -14,25 +14,24 @@ const STORAGE_KEY = 'rexBrowsingUrlActive'
 
 const MAX_HELD = 256
 
-export function isUrlActiveRecord(value: unknown): value is RexPageUrlActiveEvent {
+/** The fields a url-active record must carry; the tab fields are copied when present. */
+export type UrlActiveRecord = Pick<RexPageUrlActiveEvent, 'url' | 'url_shown_at'> & Partial<RexPageUrlActiveEvent>
+
+export function isUrlActiveRecord(value: unknown): value is UrlActiveRecord {
   if (typeof value !== 'object' || value === null) {
     return false
   }
 
   const record = value as Record<string, unknown>
 
-  return typeof record.url === 'string'
-    && typeof record.url_shown_at === 'number'
-    && typeof record.tab_id === 'number'
-    && typeof record.window_id === 'number'
-    && typeof record.session_id === 'string'
+  return typeof record.url === 'string' && typeof record.url_shown_at === 'number'
 }
 
-function linkFrom(record: RexPageUrlActiveEvent): TabLink {
+function linkFrom(record: UrlActiveRecord): TabLink {
   return {
-    tab_id: record.tab_id,
-    window_id: record.window_id,
-    session_id: record.session_id,
+    ...(record.tab_id === undefined ? {} : { tab_id: record.tab_id }),
+    ...(record.window_id === undefined ? {} : { window_id: record.window_id }),
+    ...(record.session_id === undefined ? {} : { session_id: record.session_id }),
     page_events_url_shown_at: record.url_shown_at
   }
 }
@@ -46,7 +45,11 @@ export class TabLinker {
 
   constructor(private readonly store: VisitStore, private readonly tolerance: () => number) {}
 
-  async acceptUrlActive(record: RexPageUrlActiveEvent): Promise<void> {
+  async acceptUrlActive(record: UrlActiveRecord): Promise<void> {
+    if (record.tab_id === undefined || record.window_id === undefined || record.session_id === undefined) {
+      console.warn('[rex-browsing] Url-active record is missing tab fields:', record)
+    }
+
     const stored = this.writes.then(async () => {
       const held = await this.readHeld()
 
@@ -67,7 +70,7 @@ export class TabLinker {
   }
 
   async linkVisit(visit: VisitRecord): Promise<void> {
-    let newest: RexPageUrlActiveEvent | null = null
+    let newest: UrlActiveRecord | null = null
 
     for (const record of await this.readHeld()) {
       if (this.matches(visit, record) && (newest === null || record.url_shown_at > newest.url_shown_at)) {
@@ -85,7 +88,7 @@ export class TabLinker {
     await chrome.storage.session.remove(STORAGE_KEY)
   }
 
-  private matches(visit: VisitRecord, record: RexPageUrlActiveEvent): boolean {
+  private matches(visit: VisitRecord, record: UrlActiveRecord): boolean {
     const tolerance = this.tolerance()
 
     return tolerance > 0
@@ -93,7 +96,7 @@ export class TabLinker {
       && Math.abs(visit.visit_time - record.url_shown_at) <= tolerance
   }
 
-  private async readHeld(): Promise<RexPageUrlActiveEvent[]> {
+  private async readHeld(): Promise<UrlActiveRecord[]> {
     const stored = await chrome.storage.session.get(STORAGE_KEY)
     const held = stored[STORAGE_KEY]
 

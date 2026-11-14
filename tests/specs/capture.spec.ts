@@ -1842,11 +1842,47 @@ test.describe('rex-browsing — real extension', () => {
       expect(after).not.toHaveProperty('tab_id')
     })
 
+    test('links a visit from a partial url-active record', async () => {
+      const visitTime = Date.now()
+      await captureAt('607', visitTime)
+      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime })
+
+      const visit = await drainedVisit('607')
+
+      expect(visit.page_events_url_shown_at).toBe(visitTime)
+      expect(visit).not.toHaveProperty('tab_id')
+      expect(visit).not.toHaveProperty('window_id')
+      expect(visit).not.toHaveProperty('session_id')
+    })
+
+    test('links a visit recorded without ids', async () => {
+      const visitTime = Date.now()
+
+      await serviceWorker.evaluate(async ({ url, visitTime }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (self as any).rexBrowsingPlugin.visitStore.recordWithoutIds(url, '', visitTime, 'over_ceiling')
+      }, { url: LINKED_URL, visitTime })
+      await announce(urlActive(visitTime))
+
+      const visit = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return g.__capturedEvents.find((e: any) => e.name === 'rex-browsing-visit' && e.ids_unavailable === 'over_ceiling')
+      })
+
+      expect(visit.tab_id).toBe(41)
+      expect(visit).not.toHaveProperty('visit_id')
+    })
+
     test('ignores a malformed pageUrlActive and still records visits', async () => {
       const visitTime = Date.now()
 
       await sendUnanswered({ messageType: 'pageUrlActive' })
       await sendUnanswered({ messageType: 'pageUrlActive', event: urlActive(visitTime, { url: 42 }) })
+      await sendUnanswered({ messageType: 'pageUrlActive', event: urlActive(visitTime, { url_shown_at: undefined }) })
       await captureAt('606', visitTime)
 
       const visit = await drainedVisit('606')
