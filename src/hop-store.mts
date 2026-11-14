@@ -10,7 +10,7 @@ import type { CaptureRule } from './capture-rules.mts'
 import type { HopVisit } from './visit-lookup.mts'
 import { EdgeStore, type StoredEdge } from './edge-store.mjs'
 
-const KEY_PREFIX = 'rexVisitGraphHop:'
+const KEY_PREFIX = 'rexBrowsingVisit:'
 
 export interface HopRecord extends StoredEdge {
   referring_visit_id: string;

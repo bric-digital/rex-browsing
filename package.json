@@ -1,7 +1,7 @@
 {
-    "name": "@bric/rex-visit-graph",
-    "version": "2.0.1-dev",
-    "description": "REX module that captures the browser visits chrome.history.search() omits, so referrer chains resolve.",
+    "name": "@bric/rex-browsing",
+    "version": "3.0.0-dev",
+    "description": "REX module that records every browser visit after install, in the rex-history visit structure, with tab and session links.",
     "keywords": [
         "extension",
         "rex",
@@ -10,13 +10,13 @@
     ],
     "author": "Behavioral Research Innovation Center",
     "type": "module",
-    "homepage": "https://github.com/bric-digital/rex-visit-graph",
+    "homepage": "https://github.com/bric-digital/rex-browsing",
     "bugs": {
-        "url": "https://github.com/bric-digital/rex-visit-graph/issues"
+        "url": "https://github.com/bric-digital/rex-browsing/issues"
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/bric-digital/rex-visit-graph.git"
+        "url": "git+https://github.com/bric-digital/rex-browsing.git"
     },
     "exports": {
         "./service-worker": "./src/service-worker.mts"

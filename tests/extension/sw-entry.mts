@@ -33,4 +33,4 @@ g.__capturedEvents = []
 g.__listUtils = listUtils
 registerREXModule(new EventCaptureModule())
 
-g.rexVisitGraphPlugin = plugin
+g.rexBrowsingPlugin = plugin

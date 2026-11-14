@@ -18,7 +18,7 @@
  */
 
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
-import { CAPTURE_ALL, CaptureRules, DEFAULT_SCHEMES, urlAtDetail, type CaptureRule, type UrlDetail, type VisitGraphConfig } from './capture-rules.mjs'
+import { CAPTURE_ALL, CaptureRules, DEFAULT_SCHEMES, urlAtDetail, type CaptureRule, type UrlDetail, type BrowsingConfig } from './capture-rules.mjs'
 import { newestVisit } from './visit-lookup.mjs'
 import { HopStore } from './hop-store.mjs'
 import { UrlRedactor, resolveRedactionLists, type RedactionLists } from './redaction.mjs'
@@ -36,7 +36,7 @@ import { InternalPageRecorder, PageStore } from './internal-pages.mjs'
  * those without naming them: being absent from history search is what makes a
  * visit a redirect intermediate.
  */
-const DEFAULT_CONFIG: VisitGraphConfig = {
+const DEFAULT_CONFIG: BrowsingConfig = {
   enabled: true,
   capture_rules: [],
   capture_scope: 'hops',
@@ -53,7 +53,7 @@ const DEFAULT_CONFIG: VisitGraphConfig = {
   max_hop_age_days: 7
 }
 
-class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
+class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   readonly captureRules = new CaptureRules()
   readonly captureLists = new CaptureLists()
   readonly hopStore = new HopStore()
@@ -75,7 +75,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
     urlDetail: () => this.urlDetail()
   })
 
-  private config: VisitGraphConfig = DEFAULT_CONFIG
+  private config: BrowsingConfig = DEFAULT_CONFIG
 
   /** In-memory, never persisted: a fresh worker restarts with it clear. */
   private draining = false
@@ -90,7 +90,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
   } | null = null
 
   moduleName(): string {
-    return 'VisitGraph'
+    return 'rex-browsing'
   }
 
   /**
@@ -100,7 +100,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   override configurationDetails(): any {
     return {
-      visit_graph: {
+      browsing: {
         enabled: 'Boolean, true if module is active, false otherwise. When false nothing is captured, '
           + 'nothing is emitted even if a host asks, and anything already captured is discarded.',
         capture_scope: "String: 'hops' (default) captures only visits rex-history's collector cannot "
@@ -108,7 +108,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
           + 'visit graph, which duplicates ids rex-history already reports and costs a visit lookup on '
           + 'every navigation. Change to all only to restore the earlier behaviour.',
         tab_opener_edges: 'Boolean, default true. Attributes the first visit in a new tab to the page '
-          + 'that opened it, emitted as rex-visit-graph-opener points. Chrome records no referrer across '
+          + 'that opened it, emitted as rex-browsing-opener points. Chrome records no referrer across '
           + 'a tab boundary, so without this a result opened in a new tab arrives from nowhere. Needs the '
           + 'tabs permission in the host; without it nothing is recorded.',
         max_opener_visits: 'Number, default 25000. A page with more visits than this is not looked '
@@ -125,12 +125,12 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
           + 'Naming others (file, ftp, webdav) opts into them: they are not ordinary browsing, and a '
           + 'local file path is a different kind of disclosure from a web page. Naming chrome, '
           + 'chrome-untrusted or edge records the browser\'s own pages, which Chrome keeps out of '
-          + 'history, as rex-visit-graph-page points with no visit ids. Needs the tabs permission.'],
+          + 'history, as rex-browsing-page points with no visit ids. Needs the tabs permission.'],
         url_detail: "String: 'path' (default), 'none' or 'full'. 'path' keeps origin and pathname, which "
           + "says what an intermediate was without the query string, where a redirector encodes its "
           + "destination and a page may carry typed text. 'none' keeps ids only and discards the address "
           + "as soon as the visit ids are resolved. 'full' keeps the whole address. Anything kept is redacted before it is emitted, using rex-history's lists when it "
-          + 'states any, otherwise visit_graph.redaction.',
+          + 'states any, otherwise browsing.redaction.',
         debug: 'Boolean, forces url_detail to full in any build, for diagnosing a deployment. Logs a '
           + 'warning while it is on so a configuration left in this state is visible.',
         max_hop_age_days: 'Number, days after which a hop that was never emitted is discarded.',
@@ -151,7 +151,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
     }
   }
 
-  currentConfig(): VisitGraphConfig {
+  currentConfig(): BrowsingConfig {
     return this.config
   }
 
@@ -313,7 +313,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
         const url = record.url === null ? undefined : await this.redactor.redact(record.url)
 
         dispatchEvent({
-          name: 'rex-visit-graph-hop',
+          name: 'rex-browsing-visit',
           visit_id: record.visit_id,
           referring_visit_id: record.referring_visit_id,
           visit_time: record.visit_time,
@@ -332,7 +332,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
         const url = root.url === null ? undefined : await this.redactor.redact(root.url)
 
         dispatchEvent({
-          name: 'rex-visit-graph-opener',
+          name: 'rex-browsing-opener',
           visit_id: root.visit_id,
           referring_visit_id: record.opener_visit_id,
           visit_time: root.visit_time,
@@ -349,7 +349,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
         const url = record.url === null ? undefined : await this.redactor.redact(record.url)
 
         dispatchEvent({
-          name: 'rex-visit-graph-page',
+          name: 'rex-browsing-page',
           visit_time: record.visit_time,
           tab_id: record.tab_id,
           capture_rule: record.capture_rule,
@@ -377,7 +377,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
 
       return emitted.length + emittedOpeners.length + emittedPages.length
     } catch (error) {
-      console.error('[rex-visit-graph] Drain failed:', error)
+      console.error('[rex-browsing] Drain failed:', error)
       return 0
     } finally {
       this.draining = false
@@ -385,7 +385,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   /**
-   * `triggerVisitGraphDrain` emits any stored hops now and responds with the
+   * `triggerBrowsingDrain` emits any stored hops now and responds with the
    * count, so a host extension can drain on its own cadence rather than waiting
    * for the alarm.
    */
@@ -394,7 +394,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
     _sender: unknown,
     sendResponse: (response: unknown) => void
   ): boolean {
-    if (message?.messageType !== 'triggerVisitGraphDrain') {
+    if (message?.messageType !== 'triggerBrowsingDrain') {
       return false
     }
 
@@ -416,7 +416,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
    */
   urlDetail(): UrlDetail {
     if (this.config.debug === true) {
-      console.warn('[rex-visit-graph] visit_graph.debug is on: emitting full addresses, '
+      console.warn('[rex-browsing] browsing.debug is on: emitting full addresses, '
         + `overriding url_detail="${this.config.url_detail ?? 'path'}".`)
       return 'full'
     }
@@ -448,7 +448,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
    * and nothing to fake. Anything asynchronous a change implies is the caller's,
    * immediately after — see reconcileStore.
    */
-  updateConfiguration(section: Partial<VisitGraphConfig> | undefined, history?: RedactionLists): void {
+  updateConfiguration(section: Partial<BrowsingConfig> | undefined, history?: RedactionLists): void {
     this.config = { ...DEFAULT_CONFIG, ...(section ?? {}) }
     this.captureRules.update(this.config.capture_rules)
     this.captureRules.setSchemes(this.config.schemes)
@@ -501,11 +501,11 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
         }
 
         this.tabOpeners.tabNavigated(tabId, changeInfo.url).catch((error) => {
-          console.error('[rex-visit-graph] Opener capture failed:', error)
+          console.error('[rex-browsing] Opener capture failed:', error)
         })
 
         this.captureInternalPage(tabId, changeInfo.url).catch((error) => {
-          console.error('[rex-visit-graph] Internal page capture failed:', error)
+          console.error('[rex-browsing] Internal page capture failed:', error)
         })
       },
       removed: (tabId) => {
@@ -537,7 +537,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
 
     this.historyListener = (item: chrome.history.HistoryItem) => {
       this.captureVisit(item).catch((error) => {
-        console.error('[rex-visit-graph] Capture failed:', error)
+        console.error('[rex-browsing] Capture failed:', error)
       })
     }
 
@@ -567,7 +567,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
         + await this.pageStore.clear()
 
       if (discarded > 0) {
-        console.log(`[rex-visit-graph] Disabled; discarded ${discarded} edge(s) captured before configuration.`)
+        console.log(`[rex-browsing] Disabled; discarded ${discarded} edge(s) captured before configuration.`)
       }
 
       return
@@ -582,7 +582,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
         + await this.pageStore.forgetByRule(CAPTURE_ALL.id)
 
       if (discarded > 0) {
-        console.log(`[rex-visit-graph] Narrowed by configuration; discarded ${discarded} hop(s) `
+        console.log(`[rex-browsing] Narrowed by configuration; discarded ${discarded} hop(s) `
           + 'captured before it arrived.')
       }
     }
@@ -594,18 +594,18 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
       const all = await rexCorePlugin.fetchConfiguration() as Record<string, unknown> | undefined
 
       this.updateConfiguration(
-        all?.['visit_graph'] as Partial<VisitGraphConfig> | undefined,
+        all?.['browsing'] as Partial<BrowsingConfig> | undefined,
         all?.['history'] as RedactionLists | undefined
       )
 
       await this.reconcileStore()
     } catch (error) {
-      console.error('[rex-visit-graph] Failed to load configuration:', error)
+      console.error('[rex-browsing] Failed to load configuration:', error)
     }
   }
 
   async setup(): Promise<void> {
-    console.log('[rex-visit-graph/service-worker] Setting up visit graph capture')
+    console.log('[rex-browsing/service-worker] Setting up visit graph capture')
 
     // Listen before configuration is fetched, because the module defaults to
     // enabled and onVisited fires once: a visit missed while the fetch is in
@@ -619,7 +619,7 @@ class VisitGraphServiceWorkerModule extends REXServiceWorkerModule {
   }
 }
 
-const plugin = new VisitGraphServiceWorkerModule()
+const plugin = new BrowsingServiceWorkerModule()
 
 registerREXModule(plugin)
 

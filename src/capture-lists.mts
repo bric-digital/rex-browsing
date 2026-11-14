@@ -85,7 +85,7 @@ export class CaptureLists {
     try {
       return await this.matches(listName, url)
     } catch (error) {
-      console.error(`[rex-visit-graph] Block list ${listName} unreadable, treating as a match:`, error)
+      console.error(`[rex-browsing] Block list ${listName} unreadable, treating as a match:`, error)
       return true
     }
   }
@@ -95,7 +95,7 @@ export class CaptureLists {
     try {
       return await this.matches(listName, url)
     } catch (error) {
-      console.error(`[rex-visit-graph] Allow list ${listName} unreadable, treating as no match:`, error)
+      console.error(`[rex-browsing] Allow list ${listName} unreadable, treating as no match:`, error)
       return false
     }
   }

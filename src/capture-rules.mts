@@ -32,7 +32,7 @@ export interface CaptureRule {
   path_prefix: string;
 }
 
-export interface VisitGraphConfig {
+export interface BrowsingConfig {
   enabled: boolean;
   capture_rules: CaptureRule[];
   /**

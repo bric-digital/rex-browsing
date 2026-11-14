@@ -25,7 +25,7 @@ import { EdgeStore, type StoredEdge } from './edge-store.mjs'
 import type { HopRecord } from './hop-store.mjs'
 import { newestVisit, visitCount } from './visit-lookup.mjs'
 
-const KEY_PREFIX = 'rexVisitGraphOpener:'
+const KEY_PREFIX = 'rexBrowsingOpener:'
 
 /**
  * How long after creation a tab's first navigation still counts as the thing
@@ -260,8 +260,8 @@ export class TabOpenerTracker {
       return false
     }
 
-    console.log(`[rex-visit-graph] Opener has ${count} visits, over the ${ceiling} ceiling; `
-      + 'not resolving it. Set visit_graph.max_opener_visits to change this.')
+    console.log(`[rex-browsing] Opener has ${count} visits, over the ${ceiling} ceiling; `
+      + 'not resolving it. Set browsing.max_opener_visits to change this.')
 
     return true
   }

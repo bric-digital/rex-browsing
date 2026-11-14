@@ -36,7 +36,7 @@ export async function visitCount(url: string): Promise<number | null> {
 
     return match?.visitCount ?? null
   } catch (error) {
-    console.warn('[rex-visit-graph] visit count lookup failed:', error)
+    console.warn('[rex-browsing] visit count lookup failed:', error)
     return null
   }
 }
@@ -67,7 +67,7 @@ export async function newestVisit(url: string): Promise<HopVisit | null> {
   } catch (error) {
     // This runs inside an onVisited handler, where an unhandled rejection is
     // invisible. Report the miss instead of throwing.
-    console.warn('[rex-visit-graph] getVisits failed:', error)
+    console.warn('[rex-browsing] getVisits failed:', error)
     return null
   }
 }

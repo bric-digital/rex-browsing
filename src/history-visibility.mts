@@ -53,7 +53,7 @@ export async function collectorCanSee(
   } catch (error) {
     // Runs inside an onVisited handler, where an unhandled rejection is
     // invisible. Report the miss instead of throwing.
-    console.warn('[rex-visit-graph] history.search failed, treating the visit as uncollected:', error)
+    console.warn('[rex-browsing] history.search failed, treating the visit as uncollected:', error)
     return false
   }
 }

@@ -17,7 +17,7 @@ import { urlAtDetail, type CaptureRules, type UrlDetail } from './capture-rules.
 import type { CaptureLists } from './capture-lists.mjs'
 import { EdgeStore, type StoredRecord } from './edge-store.mjs'
 
-const KEY_PREFIX = 'rexVisitGraphPage:'
+const KEY_PREFIX = 'rexBrowsingPage:'
 
 /** Edge serves its own pages as `edge://`. */
 export const UNRECORDED_SCHEMES = ['chrome', 'chrome-untrusted', 'edge']

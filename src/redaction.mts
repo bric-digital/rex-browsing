@@ -8,7 +8,7 @@
  * Settings resolve to rex-history's first, so a study that has already decided
  * what may be recorded does not have to state it twice and the two modules cannot
  * disagree. A study running this module without rex-history configures the same
- * keys under `visit_graph.redaction`.
+ * keys under `browsing.redaction`.
  *
  * List CONTENTS are not synced here. Matching reads whatever rex-lists holds in
  * IndexedDB, populated by whichever module owns the sync. An empty database means
@@ -100,7 +100,7 @@ export class UrlRedactor {
     try {
       return (await listUtils.matchDomainAgainstList(url, listName)) ?? null
     } catch (error) {
-      console.error(`[rex-visit-graph] Error checking list ${listName}:`, error)
+      console.error(`[rex-browsing] Error checking list ${listName}:`, error)
       return null
     }
   }
@@ -108,11 +108,11 @@ export class UrlRedactor {
 
 /**
  * rex-history's settings win when it has any, so the two modules cannot disagree
- * about what may be recorded. `visit_graph.redaction` applies only when rex-history
+ * about what may be recorded. `browsing.redaction` applies only when rex-history
  * states nothing.
  *
  * When both are set the precedence is announced rather than silent: a study that
- * writes `visit_graph.redaction` and sees rex-history's lists applied instead has
+ * writes `browsing.redaction` and sees rex-history's lists applied instead has
  * no way to tell from the data that its own setting was ignored.
  */
 export function resolveRedactionLists(
@@ -135,8 +135,8 @@ export function resolveRedactionLists(
       || (ownSection?.domain_only_lists?.length ?? 0) > 0
 
     if (ownStatesSomething) {
-      console.warn('[rex-visit-graph] Both rex-history and visit_graph.redaction state lists. '
-        + "rex-history's are being used; visit_graph.redaction is ignored.")
+      console.warn('[rex-browsing] Both rex-history and browsing.redaction state lists. '
+        + "rex-history's are being used; browsing.redaction is ignored.")
     }
 
     return history
