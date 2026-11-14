@@ -325,6 +325,19 @@ test.describe('rex-browsing — real extension', () => {
     }
   })
 
+  test('defaults max_visits_per_url to 10000', async () => {
+    const config = await serviceWorker.evaluate(async () => {
+      await chrome.storage.local.set({ REXConfiguration: {} })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      await p.refreshConfiguration()
+      return p.currentConfig()
+    })
+
+    expect(config.max_visits_per_url).toBe(10000)
+    expect(config).not.toHaveProperty('max_opener_visits')
+  })
+
   test('server configuration replaces the defaults', async () => {
     const config = await serviceWorker.evaluate(async () => {
       await chrome.storage.local.set({
@@ -332,7 +345,7 @@ test.describe('rex-browsing — real extension', () => {
           browsing: {
             enabled: true,
             internal_pages: true,
-            max_opener_visits: 10,
+            max_visits_per_url: 10,
             max_record_age_days: 3
           }
         }
@@ -344,7 +357,7 @@ test.describe('rex-browsing — real extension', () => {
     })
 
     expect(config.internal_pages).toBe(true)
-    expect(config.max_opener_visits).toBe(10)
+    expect(config.max_visits_per_url).toBe(10)
     expect(config.max_record_age_days).toBe(3)
   })
 
@@ -1036,6 +1049,152 @@ test.describe('rex-browsing — real extension', () => {
       expect(recorded).toBeDefined()
       expect(recorded.title).toBe(PAGE_TITLE)
     })
+
+    test('records a visit over the ceiling without ids', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+
+      await serviceWorker.evaluate((url) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        g.__firedCounts = []
+        g.__firedListener = (item: chrome.history.HistoryItem) => {
+          if (item.url === url) g.__firedCounts.push(item.visitCount)
+        }
+        chrome.history.onVisited.addListener(g.__firedListener)
+      }, visitedUrl)
+
+      await visit(visitedUrl)
+
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__lookedUp = []
+        g.__realGetVisits = chrome.history.getVisits
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(chrome.history as any).getVisits = (details: { url: string }) => {
+          g.__lookedUp.push(details.url)
+          return g.__realGetVisits.call(chrome.history, details)
+        }
+      })
+
+      await visit(visitedUrl)
+
+      const observed = await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        chrome.history.onVisited.removeListener(g.__firedListener)
+        ;(chrome.history as any).getVisits = g.__realGetVisits
+        return { counts: g.__firedCounts as number[], lookedUp: g.__lookedUp as string[] }
+      })
+
+      // onVisited's visitCount already includes the visit that fired it.
+      expect(observed.counts).toEqual([1, 2])
+      expect(observed.lookedUp).not.toContain(visitedUrl)
+
+      const events = (await drainVisits()).filter((e) => e.url === visitedUrl)
+      const over = events.filter((e) => e.ids_unavailable === 'over_ceiling')
+
+      expect(events).toHaveLength(2)
+      expect(over).toHaveLength(1)
+      expect(over[0]).not.toHaveProperty('visit_id')
+      expect(over[0]).not.toHaveProperty('referring_visit_id')
+      expect(events.find((e) => e.ids_unavailable === undefined).visit_id).toBeDefined()
+    })
+
+    test('records a visit whose lookup fails', async () => {
+      const neverVisited = `${ORIGIN}/never-visited?marker=${marker()}`
+      const visitTime = Date.now()
+
+      await serviceWorker.evaluate(async ({ url, visitTime }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (self as any).rexBrowsingPlugin.captureVisit({ id: '1', url, title: 'Gone', lastVisitTime: visitTime, visitCount: 1 })
+      }, { url: neverVisited, visitTime })
+
+      const recorded = (await drainVisits()).find((e) => e.url === neverVisited)
+
+      expect(recorded).toEqual({
+        name: 'rex-browsing-visit',
+        url: neverVisited,
+        recorded_url: neverVisited,
+        title: 'Gone',
+        visit_time: visitTime,
+        date: visitTime,
+        domain: 'example.com',
+        ids_unavailable: 'lookup_failed'
+      })
+    })
+
+    test('sends one ceiling event per url per drain', async () => {
+      const heavyUrl = `${ORIGIN}/plain?marker=${marker()}`
+      const ordinaryUrl = `${ORIGIN}/plain?marker=${marker()}`
+
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+      })
+
+      // The over-ceiling visits are given times before the real one, as real
+      // visits to the page would have, so its history item is found at drain.
+      const before = Date.now()
+      await visit(heavyUrl)
+      await visit(ordinaryUrl)
+
+      await serviceWorker.evaluate(async ({ url, before }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (self as any).rexBrowsingPlugin
+        for (let index = 0; index < 3; index += 1) {
+          await p.captureVisit({ id: '1', url, title: 'Heavy', lastVisitTime: before + index, visitCount: 2 + index })
+        }
+      }, { url: heavyUrl, before })
+
+      const result = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        return g.__capturedEvents
+      })
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ceilingEvents = result.filter((e: any) => e.name === 'pdk-app-event'
+        && e.event_name === 'rex-browsing-visit-ceiling-exceeded')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const heavy = result.filter((e: any) => e.url === heavyUrl && e.ids_unavailable === 'over_ceiling')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ordinary = result.find((e: any) => e.name === 'rex-browsing-visit' && e.url === ordinaryUrl)
+
+      expect(heavy).toHaveLength(3)
+      expect(ceilingEvents).toHaveLength(1)
+      expect(ceilingEvents[0].event_details.domain).toBe('example.com')
+      expect(ceilingEvents[0].event_details.ceiling).toBe(1)
+      expect(ceilingEvents[0].event_details.visits_in_drain).toBe(3)
+      expect(typeof ceilingEvents[0].event_details.visit_count).toBe('number')
+      expect(typeof ceilingEvents[0].event_details.date).toBe('number')
+      expect(ordinary.visit_id).toBeDefined()
+    })
+
+    test('sweeps and discards visits without ids like any other', async () => {
+      const result = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (self as any).rexBrowsingPlugin
+        const old = Date.now() - 60_000
+        await p.visitStore.recordWithoutIds('https://www.example.com/old', '', old, 'lookup_failed')
+        await p.visitStore.recordWithoutIds('https://www.example.com/new', '', Date.now(), 'over_ceiling')
+        await p.visitStore.sweep(Date.now() - 30_000)
+        const afterSweep = (await p.visitStore.readAll()).map((r: { url: string }) => r.url)
+
+        p.updateConfiguration({ enabled: false })
+        await p.reconcileStore()
+        const afterDisable = (await p.visitStore.readAll()).length
+        p.updateConfiguration({ enabled: true })
+
+        return { afterSweep, afterDisable }
+      })
+
+      expect(result.afterSweep).toEqual(['https://www.example.com/new'])
+      expect(result.afterDisable).toBe(0)
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -1180,7 +1339,7 @@ test.describe('rex-browsing — real extension', () => {
       await serviceWorker.evaluate(async ({ opener, maxOpenerVisits }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
-        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_opener_visits: maxOpenerVisits })
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: maxOpenerVisits })
 
         // A second visit, so the count exceeds a ceiling of one. The navigation
         // below supplies the first.

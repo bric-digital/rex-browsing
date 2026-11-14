@@ -8,7 +8,7 @@
  */
 
 import type { RexPageUrlActiveEvent } from '@bric/rex-types/types'
-import type { TabLink, VisitRecord, VisitStore } from './visit-store.mjs'
+import { storageIdOf, type TabLink, type VisitRecord, type VisitStore } from './visit-store.mjs'
 
 const STORAGE_KEY = 'rexBrowsingUrlActive'
 
@@ -61,7 +61,7 @@ export class TabLinker {
       const current = visit.link?.page_events_url_shown_at
 
       if (this.matches(visit, record) && (current === undefined || current < record.url_shown_at)) {
-        await this.store.attachLink(visit.visit_id, linkFrom(record))
+        await this.store.attachLink(storageIdOf(visit), linkFrom(record))
       }
     }
   }
@@ -76,7 +76,7 @@ export class TabLinker {
     }
 
     if (newest !== null) {
-      await this.store.attachLink(visit.visit_id, linkFrom(newest))
+      await this.store.attachLink(storageIdOf(visit), linkFrom(newest))
     }
   }
 

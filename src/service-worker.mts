@@ -15,7 +15,7 @@
 
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
 import { isRecordedScheme, newestVisit } from './visit-lookup.mjs'
-import { VisitStore } from './visit-store.mjs'
+import { VisitStore, storageIdOf, type VisitRecord } from './visit-store.mjs'
 import { historyItemFields, registeredDomain } from './history-item.mjs'
 import { OpenerStore, TabOpenerTracker, chainRoot } from './tab-opener.mjs'
 import { InternalPageRecorder, PageStore } from './internal-pages.mjs'
@@ -31,14 +31,14 @@ export interface BrowsingConfig {
    */
   tab_opener_edges: boolean;
   /**
-   * Ceiling on an opener page's visit count, above which it is not looked up.
+   * Ceiling on a page's visit count, above which its visit ids are not looked up.
    *
    * `getVisits()` takes no time range and no limit, so its cost scales with how
    * many visits a URL has ever had. A page that re-records a visit every few
-   * seconds reaches a size where resolving it costs about a second, and the
-   * opener path pays that on every new tab. Non-positive disables the ceiling.
+   * seconds reaches a size where resolving it costs about a second, paid on
+   * every visit to it and every tab it opens. Non-positive disables the ceiling.
    */
-  max_opener_visits: number;
+  max_visits_per_url: number;
   /** Records the browser's own pages, which Chrome keeps out of history. */
   internal_pages: boolean;
   max_record_age_days: number;
@@ -48,12 +48,11 @@ const DEFAULT_CONFIG: BrowsingConfig = {
   enabled: false,
   page_events_link_tolerance_ms: 5000,
   tab_opener_edges: true,
-  // Chosen from the measured cost, which scales with the count: 440,000 visits
-  // resolve in ~1075ms, so ~2.4us each, and 25,000 is about 60ms. Above any
-  // organic page — visiting one 20 times a day for three years is ~22,000 — and
-  // reached in under a day by a page that re-records every few seconds. It is a
-  // judgement, not a finding, which is why it is server config.
-  max_opener_visits: 25_000,
+  // Chrome keeps about 90 days of history, and 100 visits a day for 90 days is
+  // 9,000, so 10,000 is above any human browsing while a page re-recording a
+  // visit every few seconds passes it within days. The name and value match
+  // rex-history's. It is a judgement, not a finding, which is why it is server config.
+  max_visits_per_url: 10_000,
   internal_pages: false,
   max_record_age_days: 7
 }
@@ -64,7 +63,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   readonly openerStore = new OpenerStore()
   readonly tabOpeners = new TabOpenerTracker({
     store: this.openerStore,
-    maxOpenerVisits: () => this.config.max_opener_visits
+    maxVisitsPerUrl: () => this.config.max_visits_per_url
   })
   readonly pageStore = new PageStore()
   readonly internalPages = new InternalPageRecorder({
@@ -111,11 +110,11 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
           + 'that opened it, emitted as rex-browsing-opener points. Chrome records no referrer across '
           + 'a tab boundary, so without this a result opened in a new tab arrives from nowhere. Needs the '
           + 'tabs permission in the host; without it nothing is recorded.',
-        max_opener_visits: 'Number, default 25000. A page with more visits than this is not looked '
-          + 'up when it opens a tab, so no opener edge is recorded for tabs it opens. getVisits() '
-          + 'cannot be bounded and costs about a second on a page that re-records a visit every few '
-          + 'seconds, charged per new tab. Raise it to keep attribution on a heavily revisited page, '
-          + 'lower it if lookups are still costing participants, 0 to remove the ceiling entirely.',
+        max_visits_per_url: 'Number, default 10000. A page with more visits than this is not looked '
+          + 'up: its visits are recorded without visit ids (ids_unavailable: over_ceiling), each drain '
+          + 'sends one rex-browsing-visit-ceiling-exceeded event per such page, and no opener edge is '
+          + 'recorded for tabs it opens. getVisits() cannot be bounded and costs about a second on a '
+          + 'page that re-records a visit every few seconds. 0 removes the ceiling entirely.',
         internal_pages: 'Boolean, default false. Records the browser\'s own pages (chrome://, '
           + 'chrome-untrusted://, edge://), which Chrome keeps out of history, as rex-browsing-page '
           + 'points with no visit ids. These addresses can carry text the participant typed. Needs '
@@ -137,15 +136,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       return false
     }
 
-    // Keyed by visit id, so capturing the same visit twice writes the same
-    // record rather than a duplicate.
-    const visit = await newestVisit(item.url, item.lastVisitTime)
-
-    if (visit === null) {
-      return false
-    }
-
-    const record = await this.visitStore.record(visit)
+    const record = await this.recordVisit(item.url, item.title ?? '', item.lastVisitTime, item.visitCount)
 
     // The visit is stored at this point, so a link failure is not a capture failure.
     try {
@@ -155,6 +146,34 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
 
     return true
+  }
+
+  /**
+   * Keyed by visit id, so capturing the same visit twice writes the same record
+   * rather than a duplicate. A visit whose ids cannot be had is still recorded.
+   * `visitCount` already includes the visit being recorded.
+   */
+  private async recordVisit(url: string, title: string, lastVisitTime: number | undefined,
+    visitCount: number | undefined): Promise<VisitRecord> {
+    const visitTime = lastVisitTime ?? Date.now()
+
+    if (this.isOverCeiling(visitCount)) {
+      return this.visitStore.recordWithoutIds(url, title, visitTime, 'over_ceiling')
+    }
+
+    const visit = await newestVisit(url, lastVisitTime)
+
+    if (visit === null) {
+      return this.visitStore.recordWithoutIds(url, title, visitTime, 'lookup_failed')
+    }
+
+    return this.visitStore.record(visit)
+  }
+
+  private isOverCeiling(visitCount: number | undefined): boolean {
+    const ceiling = this.config.max_visits_per_url
+
+    return ceiling > 0 && visitCount !== undefined && visitCount > ceiling
   }
 
   /** A tab committed a URL Chrome may keep out of history. */
@@ -219,6 +238,23 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       const emittedPages: string[] = []
 
       for (const record of records) {
+        if (record.ids_unavailable !== undefined) {
+          dispatchEvent({
+            name: 'rex-browsing-visit',
+            url: record.url,
+            recorded_url: record.url,
+            title: record.title,
+            visit_time: record.visit_time,
+            date: record.visit_time,
+            domain: registeredDomain(record.url),
+            ids_unavailable: record.ids_unavailable,
+            ...(record.link ?? {})
+          })
+
+          emitted.push(storageIdOf(record))
+          continue
+        }
+
         // Read at drain rather than at visit time, because onVisited often fires
         // before the page's title is known.
         const item = await historyItemFields(record.url, record.visit_time)
@@ -240,6 +276,8 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
         emitted.push(record.visit_id)
       }
+
+      await this.emitCeilingEvents(records)
 
       // Resolved against the visits read in this same drain, so a redirect chain
       // in the new tab attaches the edge to its root rather than its landing.
@@ -292,6 +330,38 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       return 0
     } finally {
       this.draining = false
+    }
+  }
+
+  /** One event per URL whose visits in this drain went over the ceiling, mirroring rex-history's. */
+  private async emitCeilingEvents(records: VisitRecord[]): Promise<void> {
+    const overByUrl = new Map<string, { visitTime: number; count: number }>()
+
+    for (const record of records) {
+      if (record.ids_unavailable === 'over_ceiling') {
+        const seen = overByUrl.get(record.url)
+
+        overByUrl.set(record.url, {
+          visitTime: Math.min(seen?.visitTime ?? record.visit_time, record.visit_time),
+          count: (seen?.count ?? 0) + 1
+        })
+      }
+    }
+
+    for (const [url, over] of overByUrl) {
+      const item = await historyItemFields(url, over.visitTime)
+
+      dispatchEvent({
+        name: 'pdk-app-event',
+        event_name: 'rex-browsing-visit-ceiling-exceeded',
+        event_details: {
+          domain: registeredDomain(url),
+          ...(item?.visit_count === undefined ? {} : { visit_count: item.visit_count }),
+          ceiling: this.config.max_visits_per_url,
+          visits_in_drain: over.count,
+          date: Date.now()
+        }
+      })
     }
   }
 

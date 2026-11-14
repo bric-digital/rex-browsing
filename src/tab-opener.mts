@@ -20,7 +20,7 @@
  */
 
 import { EdgeStore, type StoredEdge } from './edge-store.mjs'
-import type { VisitRecord } from './visit-store.mjs'
+import type { IdentifiedVisitRecord, VisitRecord } from './visit-store.mjs'
 import { isRecordedScheme, newestVisit, visitCount } from './visit-lookup.mjs'
 
 const KEY_PREFIX = 'rexBrowsingOpener:'
@@ -63,7 +63,13 @@ export class OpenerStore extends EdgeStore<OpenerRecord> {
  * among the visits held, the edge stays on the first committed visit.
  */
 export function chainRoot(record: OpenerRecord, visits: VisitRecord[]): { visit_id: string; visit_time: number; url: string } {
-  const byId = new Map(visits.map((visit) => [visit.visit_id, visit]))
+  const byId = new Map<string, IdentifiedVisitRecord>()
+
+  for (const visit of visits) {
+    if (visit.ids_unavailable === undefined) {
+      byId.set(visit.visit_id, visit)
+    }
+  }
   let current: { visit_id: string; referring_visit_id: string; visit_time: number; url: string } = record
 
   // Bounded, so a cycle in stored data cannot hang the drain.
@@ -83,7 +89,7 @@ export function chainRoot(record: OpenerRecord, visits: VisitRecord[]): { visit_
 export interface TabOpenerDependencies {
   store: OpenerStore;
   /** Ceiling on an opener's visit count; non-positive means no ceiling. */
-  maxOpenerVisits: () => number;
+  maxVisitsPerUrl: () => number;
 }
 
 export class TabOpenerTracker {
@@ -223,7 +229,7 @@ export class TabOpenerTracker {
    * that was wanted.
    */
   private async tooManyVisits(url: string): Promise<boolean> {
-    const ceiling = this.deps.maxOpenerVisits()
+    const ceiling = this.deps.maxVisitsPerUrl()
 
     if (ceiling <= 0) {
       return false
@@ -236,7 +242,7 @@ export class TabOpenerTracker {
     }
 
     console.log(`[rex-browsing] Opener has ${count} visits, over the ${ceiling} ceiling; `
-      + 'not resolving it. Set browsing.max_opener_visits to change this.')
+      + 'not resolving it. Set browsing.max_visits_per_url to change this.')
 
     return true
   }
