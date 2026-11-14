@@ -174,6 +174,30 @@ test.describe('rex-browsing — real extension', () => {
     expect(count).toBe(20)
   })
 
+  test('a tab link failure after the visit is stored does not fail the capture', async () => {
+    const result = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      const realGetVisits = chrome.history.getVisits
+      const realLinkVisit = p.tabLinker.linkVisit
+      chrome.history.getVisits = async () => ([
+        { id: '1', visitId: '41', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true }
+      ]) as never
+      p.tabLinker.linkVisit = async () => { throw new Error('session storage unavailable') }
+      try {
+        const captured = await p.captureVisit({ id: '1', url: 'https://www.example.com/link-fails' })
+          .then((value: boolean) => ({ value }), (error: unknown) => ({ rejected: String(error) }))
+        return { captured, stored: (await p.visitStore.readAll()).map((r: { visit_id: string }) => r.visit_id) }
+      } finally {
+        chrome.history.getVisits = realGetVisits
+        p.tabLinker.linkVisit = realLinkVisit
+      }
+    })
+
+    expect(result.captured).toEqual({ value: true })
+    expect(result.stored).toEqual(['41'])
+  })
+
   // -------------------------------------------------------------------------
   // Drain
   // -------------------------------------------------------------------------
@@ -204,6 +228,37 @@ test.describe('rex-browsing — real extension', () => {
     expect(first.transition_type).toBe('link')
     expect(first.is_local).toBe(true)
     expect(first).not.toHaveProperty('capture_rule')
+  })
+
+  test('passes absent history-item counts through as absent, as rex-history does', async () => {
+    const recorded = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
+      const url = 'https://www.example.com/no-counts'
+      await p.visitStore.record({ url, visitId: '51', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true })
+      const real = chrome.history.search
+      chrome.history.search = async () => ([{ id: '7', url, title: 'No counts' }]) as never
+      try {
+        await p.drain()
+      } finally {
+        chrome.history.search = real
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const event = (self as any).__capturedEvents.find((e: any) => e.visit_id === '51')
+      return {
+        history_item_id: event.history_item_id,
+        last_visit_time: String(event.last_visit_time),
+        visit_count: String(event.visit_count),
+        typed_count: String(event.typed_count)
+      }
+    })
+
+    expect(recorded).toEqual({
+      history_item_id: '7',
+      last_visit_time: 'undefined',
+      visit_count: 'undefined',
+      typed_count: 'undefined'
+    })
   })
 
   test('a visit stranded by a worker kill is emitted after restart', async () => {
@@ -422,11 +477,13 @@ test.describe('rex-browsing — real extension', () => {
       return {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         events: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit'),
+        stored: (await p.visitStore.readAll()).length,
         listening: p.isListening()
       }
     })
 
     expect(result.events).toEqual([])
+    expect(result.stored).toBe(0)
     expect(result.listening).toBe(false)
   })
 
@@ -915,6 +972,69 @@ test.describe('rex-browsing — real extension', () => {
       expect(recorded.visit_id).toBeDefined()
       expect(recorded.title).toBe('')
       expect(recorded).not.toHaveProperty('visit_count')
+    })
+
+    test('two visits to one URL are two records even when both lookups run after the second', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+
+      await serviceWorker.evaluate((url) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__firedItems = []
+        g.__firedListener = (item: chrome.history.HistoryItem) => {
+          if (item.url === url) g.__firedItems.push(item)
+        }
+        chrome.history.onVisited.addListener(g.__firedListener)
+      }, visitedUrl)
+
+      await visit(visitedUrl)
+      await visit(visitedUrl)
+
+      const result = await serviceWorker.evaluate(async (url) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        chrome.history.onVisited.removeListener(g.__firedListener)
+        const items: chrome.history.HistoryItem[] = g.__firedItems
+        const visits = await chrome.history.getVisits({ url })
+
+        // Replays both onVisited items once both visits exist, which is what
+        // a handler overlapping the next visit to the same URL sees.
+        const stored = await chrome.storage.local.get()
+        await chrome.storage.local.remove(Object.keys(stored).filter((key) => key.startsWith('rexBrowsingVisit:')))
+        for (const item of items) {
+          await g.rexBrowsingPlugin.captureVisit(item)
+        }
+
+        return {
+          firedTimes: items.map((item) => item.lastVisitTime),
+          visitTimes: visits.map((visit) => visit.visitTime),
+          visitIds: visits.map((visit) => visit.visitId).sort(),
+          storedIds: (await g.rexBrowsingPlugin.visitStore.readAll()).map((r: { visit_id: string }) => r.visit_id).sort()
+        }
+      }, visitedUrl)
+
+      expect(result.firedTimes).toHaveLength(2)
+      // Chrome hands each onVisited listener the firing visit's own time.
+      expect([...result.firedTimes].sort()).toEqual([...result.visitTimes].sort())
+      expect(result.storedIds).toHaveLength(2)
+      expect(result.storedIds).toEqual(result.visitIds)
+    })
+
+    test('carries the item fields of a short URL that many newer URLs share words with', async () => {
+      const visitedUrl = `${ORIGIN}/plain`
+      await visit(visitedUrl)
+
+      await serviceWorker.evaluate(async (origin) => {
+        for (let index = 0; index < 100; index += 1) {
+          await chrome.history.addUrl({ url: `${origin}/plain/n${index}` })
+        }
+      }, ORIGIN)
+
+      const events = await drainVisits()
+      const recorded = events.find((e) => e.url === visitedUrl)
+
+      expect(recorded).toBeDefined()
+      expect(recorded.title).toBe(PAGE_TITLE)
     })
   })
 

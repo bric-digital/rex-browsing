@@ -139,13 +139,21 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
     // Keyed by visit id, so capturing the same visit twice writes the same
     // record rather than a duplicate.
-    const visit = await newestVisit(item.url)
+    const visit = await newestVisit(item.url, item.lastVisitTime)
 
     if (visit === null) {
       return false
     }
 
-    await this.tabLinker.linkVisit(await this.visitStore.record(visit))
+    const record = await this.visitStore.record(visit)
+
+    // The visit is stored at this point, so a link failure is not a capture failure.
+    try {
+      await this.tabLinker.linkVisit(record)
+    } catch (error) {
+      console.error('[rex-browsing] Tab link failed:', error)
+    }
+
     return true
   }
 
@@ -213,7 +221,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       for (const record of records) {
         // Read at drain rather than at visit time, because onVisited often fires
         // before the page's title is known.
-        const item = await historyItemFields(record.url)
+        const item = await historyItemFields(record.url, record.visit_time)
 
         dispatchEvent({
           name: 'rex-browsing-visit',

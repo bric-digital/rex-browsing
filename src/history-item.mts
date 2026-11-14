@@ -8,9 +8,9 @@ import psl from 'psl'
 export interface HistoryItemFields {
   history_item_id: string;
   title: string;
-  last_visit_time: number;
-  visit_count: number;
-  typed_count: number;
+  last_visit_time: number | undefined;
+  visit_count: number | undefined;
+  typed_count: number | undefined;
 }
 
 /**
@@ -18,9 +18,12 @@ export interface HistoryItemFields {
  * when Chrome holds none: a redirect step search does not return, or a URL
  * deleted since the visit.
  */
-export async function historyItemFields(url: string): Promise<HistoryItemFields | null> {
+export async function historyItemFields(url: string, visitTime: number): Promise<HistoryItemFields | null> {
   try {
-    const items = await chrome.history.search({ text: url, startTime: 0, maxResults: 100 })
+    // Search matches by words, so a short URL shares its words with many
+    // others. Bounding by the visit's time keeps its own item in the results,
+    // since that item was visited at or after it.
+    const items = await chrome.history.search({ text: url, startTime: visitTime, maxResults: 0 })
     const item = items.find((candidate) => candidate.url === url)
 
     if (item === undefined) {
@@ -30,9 +33,9 @@ export async function historyItemFields(url: string): Promise<HistoryItemFields 
     return {
       history_item_id: item.id,
       title: item.title ?? '',
-      last_visit_time: item.lastVisitTime ?? 0,
-      visit_count: item.visitCount ?? 0,
-      typed_count: item.typedCount ?? 0
+      last_visit_time: item.lastVisitTime,
+      visit_count: item.visitCount,
+      typed_count: item.typedCount
     }
   } catch (error) {
     console.warn('[rex-browsing] history item lookup failed:', error)

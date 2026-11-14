@@ -3,8 +3,9 @@
  *
  * `chrome.history.onVisited` hands the listener a `HistoryItem`, which carries no
  * visit id and no referring visit id. Those come only from `getVisits()`, which
- * returns every visit that URL has ever had, so the newest one is the visit that
- * just fired.
+ * returns every visit that URL has ever had. The item's `lastVisitTime` is the
+ * firing visit's `visitTime`, which tells it apart from a later visit to the
+ * same URL that committed before the lookup returned.
  */
 
 export interface BrowsingVisit {
@@ -47,8 +48,11 @@ export async function visitCount(url: string): Promise<number | null> {
   }
 }
 
-/** Holds no state, so a function rather than a class. */
-export async function newestVisit(url: string): Promise<BrowsingVisit | null> {
+/**
+ * The visit at `visitTime` when one matches, otherwise the newest. Holds no
+ * state, so a function rather than a class.
+ */
+export async function newestVisit(url: string, visitTime?: number): Promise<BrowsingVisit | null> {
   try {
     const visits = await chrome.history.getVisits({ url })
     let newest = visits[0]
@@ -63,13 +67,15 @@ export async function newestVisit(url: string): Promise<BrowsingVisit | null> {
       }
     }
 
+    const chosen = visits.find((visit) => visitTime !== undefined && visit.visitTime === visitTime) ?? newest
+
     return {
       url,
-      visitId: newest.visitId,
-      referringVisitId: newest.referringVisitId,
-      visitTime: newest.visitTime ?? Date.now(),
-      transition: newest.transition,
-      isLocal: newest.isLocal
+      visitId: chosen.visitId,
+      referringVisitId: chosen.referringVisitId,
+      visitTime: chosen.visitTime ?? Date.now(),
+      transition: chosen.transition,
+      isLocal: chosen.isLocal
     }
   } catch (error) {
     // This runs inside an onVisited handler, where an unhandled rejection is
