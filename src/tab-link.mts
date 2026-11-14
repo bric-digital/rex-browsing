@@ -27,13 +27,23 @@ export function isUrlActiveRecord(value: unknown): value is UrlActiveRecord {
   return typeof record.url === 'string' && typeof record.url_shown_at === 'number'
 }
 
+/** A tab field of the wrong type counts as missing. */
 function linkFrom(record: UrlActiveRecord): TabLink {
   return {
-    ...(record.tab_id === undefined ? {} : { tab_id: record.tab_id }),
-    ...(record.window_id === undefined ? {} : { window_id: record.window_id }),
-    ...(record.session_id === undefined ? {} : { session_id: record.session_id }),
+    ...(typeof record.tab_id === 'number' ? { tab_id: record.tab_id } : {}),
+    ...(typeof record.window_id === 'number' ? { window_id: record.window_id } : {}),
+    ...(typeof record.session_id === 'string' ? { session_id: record.session_id } : {}),
     page_events_url_shown_at: record.url_shown_at
   }
+}
+
+/** The matching records folded oldest first, so each field keeps its newest present value. */
+function mergedLink(records: UrlActiveRecord[]): TabLink {
+  return records
+    .slice()
+    .sort((a, b) => a.url_shown_at - b.url_shown_at)
+    .map(linkFrom)
+    .reduce((merged, link) => ({ ...merged, ...link }))
 }
 
 export class TabLinker {
@@ -46,7 +56,9 @@ export class TabLinker {
   constructor(private readonly store: VisitStore, private readonly tolerance: () => number) {}
 
   async acceptUrlActive(record: UrlActiveRecord): Promise<void> {
-    if (record.tab_id === undefined || record.window_id === undefined || record.session_id === undefined) {
+    const link = linkFrom(record)
+
+    if (link.tab_id === undefined || link.window_id === undefined || link.session_id === undefined) {
       console.warn('[rex-browsing] Url-active record is missing tab fields:', record)
     }
 
@@ -60,32 +72,30 @@ export class TabLinker {
     this.writes = stored.catch(() => undefined)
     await stored
 
-    for (const visit of await this.store.readAll()) {
-      const current = visit.link?.page_events_url_shown_at
+    const held = await this.readHeld()
 
-      if (this.matches(visit, record) && (current === undefined || current < record.url_shown_at)) {
-        await this.store.attachLink(storageIdOf(visit), linkFrom(record))
+    for (const visit of await this.store.readAll()) {
+      if (this.matches(visit, record)) {
+        await this.attachHeld(visit, held)
       }
     }
   }
 
   async linkVisit(visit: VisitRecord): Promise<void> {
-    let newest: UrlActiveRecord | null = null
-
-    for (const record of await this.readHeld()) {
-      if (this.matches(visit, record) && (newest === null || record.url_shown_at > newest.url_shown_at)) {
-        newest = record
-      }
-    }
-
-    if (newest !== null) {
-      await this.store.attachLink(storageIdOf(visit), linkFrom(newest))
-    }
+    await this.attachHeld(visit, await this.readHeld())
   }
 
   /** Discard every held record. Used when the module is turned off. */
   async clear(): Promise<void> {
     await chrome.storage.session.remove(STORAGE_KEY)
+  }
+
+  private async attachHeld(visit: VisitRecord, held: UrlActiveRecord[]): Promise<void> {
+    const matching = held.filter((record) => this.matches(visit, record))
+
+    if (matching.length > 0) {
+      await this.store.attachLink(storageIdOf(visit), mergedLink(matching))
+    }
   }
 
   private matches(visit: VisitRecord, record: UrlActiveRecord): boolean {

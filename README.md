@@ -54,17 +54,17 @@ Tab fields, present when the visit is linked to a tab (see below): `tab_id`, `wi
 `ids_unavailable` is present only on a visit recorded without its ids, with one of two values:
 
 - `over_ceiling`: the address has more visits than `max_visits_per_url`, so the module did not look it up.
-- `lookup_failed`: Chrome returned no visit for the address, for example because it was deleted from history within milliseconds.
+- `lookup_failed`: Chrome's visit lookup returned nothing or failed, for example because the address was deleted from history within milliseconds.
 
-Such a record has `url`, `recorded_url`, `domain`, `title`, `visit_time` and `date`, plus tab fields when linked. It has no `visit_id`, `referring_visit_id`, `transition_type`, `is_local` or history-item fields, and `title` is the one `onVisited` reported. Analysis can count the visit, place it in time and group it by address, domain or tab. It cannot join it to a `rex-history-visit` by `visit_id`, follow its referral chain, or tell redirect steps from landings. Two such visits to one address at different times are two records; the same visit emitted twice (see Lifecycle) has no `visit_id` to match on, so match on `url` and `visit_time`.
+Such a record has `url`, `recorded_url`, `domain`, `title`, `visit_time` and `date`, plus tab fields when linked. It has no `visit_id`, `referring_visit_id`, `transition_type` or `is_local`. `title` and the history-item fields are read when the record is emitted, as for any visit; when Chrome holds no history item for the address, the history-item fields are absent and `title` is the one `onVisited` reported. Analysis can count the visit, place it in time and group it by address, domain or tab. It cannot join it to a `rex-history-visit` by `visit_id`, follow its referral chain, or tell redirect steps from landings. Two such visits to one address at different times are two records; the same visit emitted twice (see Lifecycle) has no `visit_id` to match on, so match on `url` and `visit_time`.
 
 ### `rex-browsing-visit-ceiling-exceeded`
 
-At each drain, one `pdk-app-event` per address that was recorded over the ceiling in that drain, with `event_name` `rex-browsing-visit-ceiling-exceeded` and `event_details`: `domain`, `visit_count` (Chrome's count for the address, absent when Chrome holds no history item for it), `ceiling`, `visits_in_drain` and `date`. It tells the researcher a participant's profile has an abnormally revisited page, usually one that refreshes itself.
+At each drain, one `pdk-app-event` per address that was recorded over the ceiling in that drain, with `event_name` `rex-browsing-visit-ceiling-exceeded` and `event_details`: `domain`, `visit_count` (Chrome's count for the address, absent when Chrome holds no history item for it), `ceiling` (the one in force when the earliest of those visits was recorded), `visits_in_drain` and `date`. It tells the researcher a participant's profile has an abnormally revisited page, usually one that refreshes itself.
 
 ### `rex-browsing-opener`
 
-Chrome records no referrer across a tab boundary, so a result opened in a new tab arrives with referring visit id `0`. With `tab_opener_edges` on, the first visit in a new tab is attributed to the page that opened it, from `chrome.tabs`. Fields: `visit_id`, `referring_visit_id` (the opener page's visit), `visit_time`, `date`, `transition`, `url`. In a redirect chain the edge attaches to the chain's first visit. Needs the `tabs` permission in the host extension.
+Chrome records no referrer across a tab boundary, so a result opened in a new tab arrives with referring visit id `0`. With `tab_opener_edges` on, the first visit in a new tab is attributed to the page that opened it, from `chrome.tabs`. Fields: `visit_id`, `referring_visit_id` (the opener page's visit), `visit_time`, `date`, `transition`, `url`. In a redirect chain the edge attaches to the chain's first visit. The `visit_id` can name a visit whose `rex-browsing-visit` was recorded without ids, so no visit record carries it; join such an opener record to its visit by `url` and `visit_time`. Needs the `tabs` permission in the host extension.
 
 ### `rex-browsing-page`
 
@@ -72,7 +72,7 @@ With `internal_pages` on, the browser's own pages (`chrome://`, `chrome-untruste
 
 ## Tab link
 
-A visit is linked to the tab it happened in from a `rex-page-events` url-active record. The host extension must include rex-page-events, which sends the module a `pageUrlActive` message for each record. A record needs a string `url` and a numeric `url_shown_at`; anything else is ignored. `tab_id`, `window_id` and `session_id` are copied when present, and one log line is written when any is missing, so a visit can carry a partial link. The module matches a record to a visit when the address is the same and the record's `url_shown_at` is within `page_events_link_tolerance_ms` of the visit time; the newest matching record wins. Either may arrive first. Set the tolerance to `0` to turn linking off. Without rex-page-events, visits are recorded without tab fields.
+A visit is linked to the tab it happened in from a `rex-page-events` url-active record. The host extension must include rex-page-events, which sends the module a `pageUrlActive` message for each record. A record needs a string `url` and a numeric `url_shown_at`; anything else is ignored. `tab_id`, `window_id` and `session_id` are copied when present, and one log line is written when any is missing, so a visit can carry a partial link. The module matches a record to a visit when the address is the same and the record's `url_shown_at` is within `page_events_link_tolerance_ms` of the visit time. When several records match one visit, they are merged: each tab field takes its value from the newest record that carries it, so a newer partial record does not erase a field an older one supplied, and `page_events_url_shown_at` is the newest record's. A tab field of the wrong type (a `tab_id` or `window_id` that is not a number, a `session_id` that is not a string) counts as missing. Either may arrive first. Set the tolerance to `0` to turn linking off. Without rex-page-events, visits are recorded without tab fields.
 
 ## Lifecycle
 
@@ -100,7 +100,7 @@ The module declares the same settings in code, via `configurationDetails()` in `
 | `enabled` | boolean | `false` | Turns the module on. Off, it captures and emits nothing and discards what it holds |
 | `page_events_link_tolerance_ms` | number | `5000` | Match window for linking a visit to a url-active record. `0` disables linking |
 | `tab_opener_edges` | boolean | `true` | Record `rex-browsing-opener` points |
-| `max_visits_per_url` | number | `10000` | Ceiling on an address's visit count. Above it the address is not looked up: its visits are recorded without ids (`ids_unavailable: over_ceiling`), each drain emits one `rex-browsing-visit-ceiling-exceeded` event for it, and tabs it opens get no opener record. `getVisits()` cannot be bounded and costs about a second on a page that re-records a visit every few seconds. `0` removes the ceiling |
+| `max_visits_per_url` | number | `10000` | Ceiling on an address's visit count. Above it the address is not looked up: its visits are recorded without ids (`ids_unavailable: over_ceiling`), each drain emits one `rex-browsing-visit-ceiling-exceeded` event for it, and new tabs it opens or that land on it get no opener record. `getVisits()` cannot be bounded and costs about a second on a page that re-records a visit every few seconds. `0` removes the ceiling |
 | `internal_pages` | boolean | `false` | Record `rex-browsing-page` points |
 | `max_record_age_days` | number | `7` | Days after which a record never emitted is discarded |
 

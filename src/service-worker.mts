@@ -171,7 +171,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     const visitTime = lastVisitTime ?? Date.now()
 
     if (this.isOverCeiling(visitCount)) {
-      return this.visitStore.recordWithoutIds(url, title, visitTime, 'over_ceiling')
+      return this.visitStore.recordWithoutIds(url, title, visitTime, 'over_ceiling', this.config.max_visits_per_url)
     }
 
     const visit = await newestVisit(url, lastVisitTime)
@@ -222,12 +222,13 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
 
     this.draining = true
+    const now = Date.now()
 
     try {
       // Sweep first and unconditionally, so a record past its age is discarded
       // rather than held without bound while the module is unconfigured,
       // disabled, or waiting on an identifier.
-      const cutoff = Date.now() - (this.config.max_record_age_days * 24 * 60 * 60 * 1000)
+      const cutoff = now - (this.config.max_record_age_days * 24 * 60 * 60 * 1000)
       await this.visitStore.sweep(cutoff)
       await this.openerStore.sweep(cutoff)
       await this.pageStore.sweep(cutoff)
@@ -252,15 +253,16 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
       for (const record of records) {
         if (record.ids_unavailable !== undefined) {
+          const item = await historyItemFields(record.url, record.visit_time)
           const visit: BrowsingVisitEvent = {
             name: 'rex-browsing-visit',
             url: record.url,
             recorded_url: record.url,
-            title: record.title,
             visit_time: record.visit_time,
             date: record.visit_time,
             domain: registeredDomain(record.url),
             ids_unavailable: record.ids_unavailable,
+            ...(item ?? { title: record.title }),
             ...(record.link ?? {})
           }
 
@@ -294,7 +296,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         emitted.push(record.visit_id)
       }
 
-      await this.emitCeilingEvents(records)
+      await this.emitCeilingEvents(records, now)
 
       // Resolved against the visits read in this same drain, so a redirect chain
       // in the new tab attaches the edge to its root rather than its landing.
@@ -351,17 +353,20 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   /** One event per URL whose visits in this drain went over the ceiling, mirroring rex-history's. */
-  private async emitCeilingEvents(records: VisitRecord[]): Promise<void> {
-    const overByUrl = new Map<string, { visitTime: number; count: number }>()
+  private async emitCeilingEvents(records: VisitRecord[], now: number): Promise<void> {
+    const overByUrl = new Map<string, { visitTime: number; ceiling: number | undefined; count: number }>()
 
     for (const record of records) {
       if (record.ids_unavailable === 'over_ceiling') {
         const seen = overByUrl.get(record.url)
+        const count = (seen?.count ?? 0) + 1
 
-        overByUrl.set(record.url, {
-          visitTime: Math.min(seen?.visitTime ?? record.visit_time, record.visit_time),
-          count: (seen?.count ?? 0) + 1
-        })
+        // The earliest visit's ceiling, since that is when the address went over it.
+        if (seen === undefined || record.visit_time < seen.visitTime) {
+          overByUrl.set(record.url, { visitTime: record.visit_time, ceiling: record.ceiling, count })
+        } else {
+          seen.count = count
+        }
       }
     }
 
@@ -374,9 +379,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         event_details: {
           domain: registeredDomain(url),
           ...(item?.visit_count === undefined ? {} : { visit_count: item.visit_count }),
-          ceiling: this.config.max_visits_per_url,
+          ...(over.ceiling === undefined ? {} : { ceiling: over.ceiling }),
           visits_in_drain: over.count,
-          date: Date.now()
+          date: now
         }
       })
     }

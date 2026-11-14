@@ -35,10 +35,15 @@ export interface IdentifiedVisitRecord extends HeldVisit {
   ids_unavailable?: undefined;
 }
 
-/** A visit whose ids could not be had. The title is kept from `onVisited`, since nothing else names it. */
+/**
+ * A visit whose ids could not be had. The title is kept from `onVisited`, for
+ * when Chrome holds no history item for the address at drain.
+ */
 export interface VisitRecordWithoutIds extends HeldVisit {
   title: string;
   ids_unavailable: IdsUnavailable;
+  /** The ceiling in force when an over-ceiling visit was recorded. */
+  ceiling?: number;
   visit_id?: undefined;
 }
 
@@ -84,19 +89,30 @@ export class VisitStore extends EdgeStore<VisitRecord> {
     return record
   }
 
-  async recordWithoutIds(url: string, title: string, visitTime: number, reason: IdsUnavailable): Promise<VisitRecord> {
-    const record: VisitRecord = { url, title, visit_time: visitTime, ids_unavailable: reason }
+  async recordWithoutIds(url: string, title: string, visitTime: number, reason: IdsUnavailable,
+    ceiling?: number): Promise<VisitRecord> {
+    const record: VisitRecord = {
+      url,
+      title,
+      visit_time: visitTime,
+      ids_unavailable: reason,
+      ...(ceiling === undefined ? {} : { ceiling })
+    }
 
     await this.put(record)
     return record
   }
 
-  /** Adds the tab link to a stored visit. Does nothing when the visit is not held. */
+  /**
+   * Adds the tab link to a stored visit, over any link it already has: fields
+   * present on the new link win, absent ones keep their stored values. Does
+   * nothing when the visit is not held.
+   */
   async attachLink(storageId: string, link: TabLink): Promise<void> {
     const record = await this.read(storageId)
 
     if (record !== undefined) {
-      await this.put({ ...record, link })
+      await this.put({ ...record, link: { ...record.link, ...link } })
     }
   }
 }

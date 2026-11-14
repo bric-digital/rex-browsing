@@ -858,6 +858,7 @@ test.describe('rex-browsing — real extension', () => {
     const PORT = 8793
     const ORIGIN = `http://dashboard.example.com:${PORT}`
     const PAGE_TITLE = 'Plain test page'
+    const LATE_TITLE = 'Title set after load'
     let server: import('http').Server
 
     test.beforeAll(async () => {
@@ -868,6 +869,13 @@ test.describe('rex-browsing — real extension', () => {
         if (url.pathname === '/redirect') {
           res.writeHead(302, { location: `/plain${url.search}` })
           res.end()
+          return
+        }
+
+        if (url.pathname === '/late-title') {
+          res.writeHead(200, { 'content-type': 'text/html' })
+          res.end('<!doctype html><meta charset="utf-8">'
+            + `<script>setTimeout(function () { document.title = '${LATE_TITLE}' }, 300)</script>`)
           return
         }
 
@@ -1169,9 +1177,99 @@ test.describe('rex-browsing — real extension', () => {
       expect(ceilingEvents[0].event_details.domain).toBe('example.com')
       expect(ceilingEvents[0].event_details.ceiling).toBe(1)
       expect(ceilingEvents[0].event_details.visits_in_drain).toBe(3)
-      expect(typeof ceilingEvents[0].event_details.visit_count).toBe('number')
+      // The history item's count, not the synthetic onVisited counts of 2 to 4.
+      expect(ceilingEvents[0].event_details.visit_count).toBe(1)
       expect(typeof ceilingEvents[0].event_details.date).toBe('number')
       expect(ordinary.visit_id).toBeDefined()
+    })
+
+    test('reports the ceiling in force when the visit was recorded, not at drain', async () => {
+      const heavyUrl = `${ORIGIN}/plain?marker=${marker()}`
+      const before = Date.now()
+      await visit(heavyUrl)
+
+      const ceilingEvents = await serviceWorker.evaluate(async ({ url, before }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        await g.rexBrowsingPlugin.captureVisit({ id: '1', url, title: 'Heavy', lastVisitTime: before, visitCount: 2 })
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 5 })
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return g.__capturedEvents.filter((e: any) => e.event_name === 'rex-browsing-visit-ceiling-exceeded')
+      }, { url: heavyUrl, before })
+
+      expect(ceilingEvents).toHaveLength(1)
+      expect(ceilingEvents[0].event_details.ceiling).toBe(1)
+    })
+
+    test('ceiling events from one drain carry one date', async () => {
+      const firstUrl = `${ORIGIN}/plain?marker=${marker()}`
+      const secondUrl = `${ORIGIN}/plain?marker=${marker()}`
+      const before = Date.now()
+      await visit(firstUrl)
+      await visit(secondUrl)
+
+      const dates = await serviceWorker.evaluate(async ({ urls, before }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        for (const url of urls) {
+          await g.rexBrowsingPlugin.captureVisit({ id: '1', url, title: '', lastVisitTime: before, visitCount: 2 })
+        }
+
+        // A clock that moves on every read, so two reads in one drain differ.
+        const realNow = Date.now
+        let tick = realNow()
+        Date.now = () => (tick += 1)
+        g.__capturedEvents = []
+        try {
+          await g.rexBrowsingPlugin.drain()
+        } finally {
+          Date.now = realNow
+        }
+        return g.__capturedEvents
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .filter((e: any) => e.event_name === 'rex-browsing-visit-ceiling-exceeded')
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .map((e: any) => e.event_details.date)
+      }, { urls: [firstUrl, secondUrl], before })
+
+      expect(dates).toHaveLength(2)
+      expect(dates[0]).toBe(dates[1])
+    })
+
+    test('an over-ceiling visit drains with the title the page set after load', async () => {
+      const lateUrl = `${ORIGIN}/late-title?marker=${marker()}`
+
+      await serviceWorker.evaluate(async (url) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: 1 })
+        // A first visit, so the real one below goes over the ceiling.
+        await chrome.history.addUrl({ url })
+      }, lateUrl)
+
+      await visit(lateUrl)
+
+      const result = await serviceWorker.evaluate(async (url) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        const held = (await g.rexBrowsingPlugin.visitStore.readAll())
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .find((r: any) => r.url === url && r.ids_unavailable === 'over_ceiling')
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        return {
+          heldTitle: held?.title,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          drained: g.__capturedEvents.find((e: any) => e.url === url && e.ids_unavailable === 'over_ceiling')
+        }
+      }, lateUrl)
+
+      // Premise: onVisited fired before the title was set.
+      expect(result.heldTitle).toBe('')
+      expect(result.drained.title).toBe(LATE_TITLE)
     })
 
     test('sweeps and discards visits without ids like any other', async () => {
@@ -1241,7 +1339,7 @@ test.describe('rex-browsing — real extension', () => {
         if (url.pathname === '/start-ceiling') {
           res.writeHead(200, { 'content-type': 'text/html' })
           res.end('<!doctype html><meta charset="utf-8">'
-            + '<a id="blank" href="/landing-ceiling" target="_blank">blank</a>')
+            + `<a id="blank" href="/landing-ceiling${url.search}" target="_blank">blank</a>`)
           return
         }
 
@@ -1333,18 +1431,21 @@ test.describe('rex-browsing — real extension', () => {
      * the ceiling is measured separately, in
      * `AI-extension-testing/one-off/measure_opener_lookup_cost.mjs`.
      */
-    async function openWithCeiling(maxOpenerVisits: number) {
-      const opener = `http://127.0.0.1:${PORT}/start-ceiling`
+    async function openWithCeiling(maxOpenerVisits: number, seeded: 'opener' | 'landing' = 'opener') {
+      // The landing case uses fresh addresses, so only its seeded visits count.
+      const search = seeded === 'landing' ? `?marker=${Date.now()}` : ''
+      const opener = `http://127.0.0.1:${PORT}/start-ceiling${search}`
+      const landing = `http://127.0.0.1:${PORT}/landing-ceiling${search}`
 
-      await serviceWorker.evaluate(async ({ opener, maxOpenerVisits }) => {
+      await serviceWorker.evaluate(async ({ opener, landing, seeded, maxOpenerVisits }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
         g.rexBrowsingPlugin.updateConfiguration({ enabled: true, max_visits_per_url: maxOpenerVisits })
 
         // A second visit, so the count exceeds a ceiling of one. The navigation
         // below supplies the first.
-        await chrome.history.addUrl({ url: opener })
-      }, { opener, maxOpenerVisits })
+        await chrome.history.addUrl({ url: seeded === 'opener' ? opener : landing })
+      }, { opener, landing, seeded, maxOpenerVisits })
 
       const tab = await context.newPage()
       await tab.goto(opener)
@@ -1383,7 +1484,7 @@ test.describe('rex-browsing — real extension', () => {
       await newTab?.close().catch(() => {})
       await tab.close()
 
-      return { opener, ...result }
+      return { opener, landing, ...result }
     }
 
     test('an opener past the visit ceiling is not looked up, and records no edge', async () => {
@@ -1401,6 +1502,16 @@ test.describe('rex-browsing — real extension', () => {
 
       expect(result.lookedUp).toContain(result.opener)
       expect(result.openers).toHaveLength(1)
+    })
+
+    test('a landing page past the visit ceiling is not looked up, and records no edge', async () => {
+      const result = await openWithCeiling(1, 'landing')
+
+      // Premise: the opener was under the ceiling and resolved, so the walk
+      // reached the landing page's lookup.
+      expect(result.lookedUp).toContain(result.opener)
+      expect(result.lookedUp).not.toContain(result.landing)
+      expect(result.openers).toHaveLength(0)
     })
 
     test('a same-tab link records no opener edge, since Chrome attributes it already', async () => {
@@ -1853,6 +1964,62 @@ test.describe('rex-browsing — real extension', () => {
       expect(visit).not.toHaveProperty('tab_id')
       expect(visit).not.toHaveProperty('window_id')
       expect(visit).not.toHaveProperty('session_id')
+    })
+
+    test('a newer partial record arriving after the visit keeps the tab fields an older one supplied', async () => {
+      const visitTime = Date.now()
+      await captureAt('608', visitTime)
+      await announce(urlActive(visitTime))
+      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime + 50, tab_id: 42 })
+
+      const visit = await drainedVisit('608')
+
+      expect(visit.page_events_url_shown_at).toBe(visitTime + 50)
+      expect(visit.tab_id).toBe(42)
+      expect(visit.window_id).toBe(7)
+      expect(visit.session_id).toBe('s1')
+    })
+
+    test('a visit arriving after several held records takes the newest present value of each tab field', async () => {
+      const visitTime = Date.now()
+      await announce(urlActive(visitTime))
+      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime + 50, tab_id: 42 })
+      await captureAt('609', visitTime)
+
+      const visit = await drainedVisit('609')
+
+      expect(visit.page_events_url_shown_at).toBe(visitTime + 50)
+      expect(visit.tab_id).toBe(42)
+      expect(visit.window_id).toBe(7)
+      expect(visit.session_id).toBe('s1')
+    })
+
+    test('copies a tab field only when it has the right type', async () => {
+      const visitTime = Date.now()
+      await captureAt('610', visitTime)
+      await announce(urlActive(visitTime, { tab_id: null, window_id: '7', session_id: 3 }))
+      // Outside the tolerance of the first, so each record matches one visit.
+      await captureAt('611', visitTime + 20_000)
+      await announce(urlActive(visitTime + 20_000, { tab_id: '41' }))
+
+      const [nulled, stringed] = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const visits = g.__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return ['610', '611'].map((id) => visits.find((e: any) => e.visit_id === id))
+      })
+
+      expect(nulled.page_events_url_shown_at).toBe(visitTime)
+      expect(nulled).not.toHaveProperty('tab_id')
+      expect(nulled).not.toHaveProperty('window_id')
+      expect(nulled).not.toHaveProperty('session_id')
+      expect(stringed.page_events_url_shown_at).toBe(visitTime + 20_000)
+      expect(stringed).not.toHaveProperty('tab_id')
+      expect(stringed.window_id).toBe(7)
     })
 
     test('links a visit recorded without ids', async () => {

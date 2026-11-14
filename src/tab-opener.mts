@@ -158,7 +158,7 @@ export class TabOpenerTracker {
 
     const openerVisitId = await entry.openerVisitId
 
-    if (openerVisitId === null) {
+    if (openerVisitId === null || await this.tooManyVisits(url)) {
       return false
     }
 
@@ -218,7 +218,7 @@ export class TabOpenerTracker {
   }
 
   /**
-   * Whether this opener is too expensive to resolve.
+   * Whether this opener, or the page it opened, is too expensive to resolve.
    *
    * The ceiling exists because `getVisits()` cannot be bounded: a page that
    * re-records a visit every few seconds costs about a second to resolve, and
@@ -241,7 +241,7 @@ export class TabOpenerTracker {
       return false
     }
 
-    console.log(`[rex-browsing] Opener has ${count} visits, over the ${ceiling} ceiling; `
+    console.log(`[rex-browsing] Page has ${count} visits, over the ${ceiling} ceiling; `
       + 'not resolving it. Set browsing.max_visits_per_url to change this.')
 
     return true
