@@ -37,13 +37,27 @@ function linkFrom(record: UrlActiveRecord): TabLink {
   }
 }
 
-/** The matching records folded oldest first, so each field keeps its newest present value. */
-function mergedLink(records: UrlActiveRecord[]): TabLink {
-  return records
-    .slice()
-    .sort((a, b) => a.url_shown_at - b.url_shown_at)
-    .map(linkFrom)
-    .reduce((merged, link) => ({ ...merged, ...link }))
+function foldedOldestFirst(links: TabLink[]): TabLink {
+  return links.reduce((merged, link) => ({ ...merged, ...link }))
+}
+
+/**
+ * Links folded oldest first, each field keeping its newest present value. Tab
+ * fields come only from links of the newest link's tab; links without a tab id
+ * add only the newest `page_events_url_shown_at`.
+ */
+function mergedLink(links: TabLink[]): TabLink {
+  const oldestFirst = links.slice().sort((a, b) => a.page_events_url_shown_at - b.page_events_url_shown_at)
+  const tabId = oldestFirst.map((link) => link.tab_id).filter((id) => id !== undefined).pop()
+
+  if (tabId === undefined) {
+    return foldedOldestFirst(oldestFirst)
+  }
+
+  return {
+    ...foldedOldestFirst(oldestFirst.filter((link) => link.tab_id === tabId)),
+    page_events_url_shown_at: oldestFirst[oldestFirst.length - 1].page_events_url_shown_at
+  }
 }
 
 export class TabLinker {
@@ -94,7 +108,9 @@ export class TabLinker {
     const matching = held.filter((record) => this.matches(visit, record))
 
     if (matching.length > 0) {
-      await this.store.attachLink(storageIdOf(visit), mergedLink(matching))
+      const links = matching.map(linkFrom)
+
+      await this.store.attachLink(storageIdOf(visit), mergedLink(visit.link ? [visit.link, ...links] : links))
     }
   }
 

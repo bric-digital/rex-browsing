@@ -105,14 +105,17 @@ export class VisitStore extends EdgeStore<VisitRecord> {
 
   /**
    * Adds the tab link to a stored visit, over any link it already has: fields
-   * present on the new link win, absent ones keep their stored values. Does
-   * nothing when the visit is not held.
+   * present on the new link win, absent ones keep their stored values. A link
+   * for a different tab replaces the stored one, so ids of two tabs never
+   * combine. Does nothing when the visit is not held.
    */
   async attachLink(storageId: string, link: TabLink): Promise<void> {
     const record = await this.read(storageId)
 
     if (record !== undefined) {
-      await this.put({ ...record, link: { ...record.link, ...link } })
+      const sameTab = link.tab_id === undefined || link.tab_id === record.link?.tab_id
+
+      await this.put({ ...record, link: sameTab ? { ...record.link, ...link } : link })
     }
   }
 }

@@ -1966,7 +1966,7 @@ test.describe('rex-browsing — real extension', () => {
       expect(visit).not.toHaveProperty('session_id')
     })
 
-    test('a newer partial record arriving after the visit keeps the tab fields an older one supplied', async () => {
+    test('a newer record with only a tab id takes that tab alone and brings no fields from another tab', async () => {
       const visitTime = Date.now()
       await captureAt('608', visitTime)
       await announce(urlActive(visitTime))
@@ -1976,11 +1976,11 @@ test.describe('rex-browsing — real extension', () => {
 
       expect(visit.page_events_url_shown_at).toBe(visitTime + 50)
       expect(visit.tab_id).toBe(42)
-      expect(visit.window_id).toBe(7)
-      expect(visit.session_id).toBe('s1')
+      expect(visit).not.toHaveProperty('window_id')
+      expect(visit).not.toHaveProperty('session_id')
     })
 
-    test('a visit arriving after several held records takes the newest present value of each tab field', async () => {
+    test('a visit arriving after several held records takes the tab of the newest record that has one', async () => {
       const visitTime = Date.now()
       await announce(urlActive(visitTime))
       await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime + 50, tab_id: 42 })
@@ -1990,8 +1990,58 @@ test.describe('rex-browsing — real extension', () => {
 
       expect(visit.page_events_url_shown_at).toBe(visitTime + 50)
       expect(visit.tab_id).toBe(42)
+      expect(visit).not.toHaveProperty('window_id')
+      expect(visit).not.toHaveProperty('session_id')
+    })
+
+    test('an older record arriving after a newer one was evicted does not roll the stored link back', async () => {
+      const visitTime = Date.now()
+      await captureAt('611', visitTime)
+      await announce(urlActive(visitTime + 1000))
+      await serviceWorker.evaluate(async () => {
+        await chrome.storage.session.remove('rexBrowsingUrlActive')
+      })
+      await announce(urlActive(visitTime - 1000, { window_id: 9, session_id: 'older' }))
+
+      const visit = await drainedVisit('611')
+
+      expect(visit.page_events_url_shown_at).toBe(visitTime + 1000)
+      expect(visit.tab_id).toBe(41)
       expect(visit.window_id).toBe(7)
       expect(visit.session_id).toBe('s1')
+    })
+
+    test('attachLink merges onto the stored link instead of replacing it', async () => {
+      const visitTime = Date.now()
+      await captureAt('612', visitTime)
+      await serviceWorker.evaluate(async (visitTime) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const store = (self as any).rexBrowsingPlugin.visitStore
+        await store.attachLink('612', { tab_id: 41, window_id: 7, session_id: 's1', page_events_url_shown_at: visitTime })
+        await store.attachLink('612', { tab_id: 41, window_id: 9, page_events_url_shown_at: visitTime + 5 })
+      }, visitTime)
+
+      const visit = await drainedVisit('612')
+
+      expect(visit.page_events_url_shown_at).toBe(visitTime + 5)
+      expect(visit.tab_id).toBe(41)
+      expect(visit.window_id).toBe(9)
+      expect(visit.session_id).toBe('s1')
+    })
+
+    test('tab, window and session of a linked visit all come from one tab', async () => {
+      const visitTime = Date.now()
+      await captureAt('613', visitTime)
+      await announce(urlActive(visitTime))
+      await announce(urlActive(visitTime + 10, { tab_id: 42, window_id: 8, session_id: 's2' }))
+      await announce({ name: 'rex-page-url-active', url: LINKED_URL, url_shown_at: visitTime + 20, session_id: 'other' })
+
+      const visit = await drainedVisit('613')
+
+      expect(visit.tab_id).toBe(42)
+      expect(visit.window_id).toBe(8)
+      expect(visit.session_id).toBe('s2')
+      expect(visit.page_events_url_shown_at).toBe(visitTime + 20)
     })
 
     test('copies a tab field only when it has the right type', async () => {
