@@ -80,13 +80,13 @@ A visit is linked to the tab it happened in from the module's own `chrome.webNav
 - **While disabled.** The default. The module holds no listeners and emits nothing. Anything it holds is discarded.
 - **Before an identifier exists.** Records are held, not emitted, so nothing goes out unattributed. They are emitted once rex-core's `getIdentifier` returns one.
 - **Age.** A record never emitted is discarded at the next drain after it passes `max_record_age_days`, whether or not the module is enabled or has an identifier.
-- **Emission.** The host sends `triggerBrowsingDrain`. Each record is dispatched, then deleted. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot. A visit is emitted once it is older than `tab_link_tolerance_ms`, so its tab fields are in place first; a navigation arriving later than that is not attached.
+- **Emission.** The host sends `triggerBrowsingDrain`. Each emitted record is dispatched, then deleted; a visit younger than `tab_link_tolerance_ms` is not emitted and waits for a later drain. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot. A visit is emitted once it is older than `tab_link_tolerance_ms`, so its tab fields are in place first; a navigation arriving later than that is not attached.
 
 ## Messages
 
 | Message | Direction | Effect |
 |---------|-----------|--------|
-| `triggerBrowsingDrain` | host to module | Emits stored records now. The response is the number of points emitted, or `0` when nothing was emitted (disabled, no identifier, a drain already running, or an error) |
+| `triggerBrowsingDrain` | host to module | Emits stored records now, except visits younger than `tab_link_tolerance_ms`, which wait for a later drain. The response is the number of points emitted, or `0` when nothing was emitted (disabled, no identifier, a drain already running, or an error) |
 
 ## Configuration
 

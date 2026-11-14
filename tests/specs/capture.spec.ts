@@ -848,11 +848,18 @@ test.describe('rex-browsing — real extension', () => {
 
       await serviceWorker.evaluate(async () => {
         await chrome.storage.local.set({
-          REXConfiguration: { browsing: { enabled: true, tab_link_tolerance_ms: 500 } },
+          REXConfiguration: { browsing: { enabled: true } },
           rexIdentifier: 'browsing-test-participant'
         })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (self as any).rexBrowsingPlugin.refreshConfiguration()
+      })
+    })
+
+    test.beforeEach(async () => {
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
       })
     })
 
@@ -1074,7 +1081,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('records a visit whose lookup fails', async () => {
       const neverVisited = `${ORIGIN}/never-visited?marker=${marker()}`
-      const visitTime = Date.now()
+      const visitTime = Date.now() - 1000
 
       await serviceWorker.evaluate(async ({ url, visitTime }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2196,6 +2203,15 @@ test.describe('rex-browsing — real extension', () => {
       expect(await storedNavigations()).toBeUndefined()
     })
 
+    async function storedVisitIds(): Promise<string[]> {
+      return serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const records = await (self as any).rexBrowsingPlugin.visitStore.readAll()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return records.map((record: any) => record.visit_id)
+      })
+    }
+
     async function drainedCount(): Promise<number> {
       return serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2208,10 +2224,12 @@ test.describe('rex-browsing — real extension', () => {
       await captureAt('611', Date.now())
 
       expect(await drainedCount()).toBe(0)
+      expect(await storedVisitIds()).toEqual(['611'])
 
-      await captureAt('611', Date.now() - 6000)
+      await captureAt('610', Date.now() - 6000)
 
       expect(await drainedCount()).toBe(1)
+      expect(await storedVisitIds()).toEqual(['611'])
     })
 
     test('a visit whose navigation never arrives is emitted after the tolerance without tab fields', async () => {
