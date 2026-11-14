@@ -1,45 +1,47 @@
 /**
- * Captures the browser visits that `chrome.history.search()` does not return.
+ * Records every http and https visit after install, as `rex-browsing-visit`
+ * points in the structure of a `rex-history-visit`.
  *
- * Chrome stores redirect intermediates but keeps them out of history search
- * results, so a collector that enumerates with `search()` never sees them. The
- * landing page it does collect still points at one through `referringVisitId`,
- * and that id belongs to no exported row, so the chain from a click back to the
- * search that produced it terminates.
- *
- * `chrome.history.onVisited` does fire for those visits, which is the only way to
- * learn the URL. This module listens, keeps the ids, and emits them as their own
- * point type. Analysis joins them to history on `visit_id`; nothing here needs
- * rex-history to be installed.
+ * `chrome.history.onVisited` fires for every visit, including the redirect
+ * steps Chrome keeps out of history search, so a step and its landing page are
+ * both recorded and the landing's `referring_visit_id` names the step. Nothing
+ * here needs rex-history to be installed.
  *
  * Capture runs unconditionally. Emission waits for configuration, because points
- * must not be dispatched before it exists — but a hop that is not captured while
- * it happens is unrecoverable, so the listener does not wait for anything.
+ * must not be dispatched before it exists — but a visit that is not captured
+ * while it happens is unrecoverable, so the listener does not wait for anything.
  */
 
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
-import { CAPTURE_ALL, CaptureRules, DEFAULT_SCHEMES, urlAtDetail, type CaptureRule, type UrlDetail, type BrowsingConfig } from './capture-rules.mjs'
-import { newestVisit } from './visit-lookup.mjs'
-import { HopStore } from './hop-store.mjs'
-import { UrlRedactor, resolveRedactionLists, type RedactionLists } from './redaction.mjs'
-import { CaptureLists } from './capture-lists.mjs'
-import { collectorCanSee } from './history-visibility.mjs'
-import { DeferredVisits, type DeferredVisit } from './deferred-visits.mjs'
+import { isRecordedScheme, newestVisit } from './visit-lookup.mjs'
+import { VisitStore } from './visit-store.mjs'
+import { historyItemFields, registeredDomain } from './history-item.mjs'
 import { OpenerStore, TabOpenerTracker, chainRoot } from './tab-opener.mjs'
 import { InternalPageRecorder, PageStore } from './internal-pages.mjs'
 
-/**
- * Scoped by default to the visits rex-history's collector cannot see, and not
- * narrowed further. Naming sites here would make the module's default a client
- * override, and would leave any redirector nobody has seen yet silently
- * uncollected — which is the failure this module exists to end. Scope catches
- * those without naming them: being absent from history search is what makes a
- * visit a redirect intermediate.
- */
+export interface BrowsingConfig {
+  enabled: boolean;
+  /**
+   * Whether a new tab's first visit is attributed to the page that opened it.
+   * Chrome records no referrer across a tab boundary; see tab-opener.mts.
+   */
+  tab_opener_edges: boolean;
+  /**
+   * Ceiling on an opener page's visit count, above which it is not looked up.
+   *
+   * `getVisits()` takes no time range and no limit, so its cost scales with how
+   * many visits a URL has ever had. A page that re-records a visit every few
+   * seconds reaches a size where resolving it costs about a second, and the
+   * opener path pays that on every new tab. Non-positive disables the ceiling.
+   */
+  max_opener_visits: number;
+  /** Records the browser's own pages, which Chrome keeps out of history. */
+  internal_pages: boolean;
+  max_hop_age_days: number;
+}
+
 const DEFAULT_CONFIG: BrowsingConfig = {
   enabled: true,
-  capture_rules: [],
-  capture_scope: 'hops',
   tab_opener_edges: true,
   // Chosen from the measured cost, which scales with the count: 440,000 visits
   // resolve in ~1075ms, so ~2.4us each, and 25,000 is about 60ms. Above any
@@ -47,32 +49,21 @@ const DEFAULT_CONFIG: BrowsingConfig = {
   // reached in under a day by a page that re-records every few seconds. It is a
   // judgement, not a finding, which is why it is server config.
   max_opener_visits: 25_000,
-  schemes: [...DEFAULT_SCHEMES],
-  url_detail: 'path',
-  debug: false,
+  internal_pages: false,
   max_hop_age_days: 7
 }
 
 class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
-  readonly captureRules = new CaptureRules()
-  readonly captureLists = new CaptureLists()
-  readonly hopStore = new HopStore()
+  readonly visitStore = new VisitStore()
   readonly openerStore = new OpenerStore()
-  readonly deferredVisits = new DeferredVisits()
-  readonly redactor = new UrlRedactor()
   readonly tabOpeners = new TabOpenerTracker({
-    rules: this.captureRules,
-    lists: this.captureLists,
     store: this.openerStore,
-    urlDetail: () => this.urlDetail(),
     maxOpenerVisits: () => this.config.max_opener_visits
   })
   readonly pageStore = new PageStore()
   readonly internalPages = new InternalPageRecorder({
-    rules: this.captureRules,
-    lists: this.captureLists,
     store: this.pageStore,
-    urlDetail: () => this.urlDetail()
+    wanted: () => this.config.internal_pages
   })
 
   private config: BrowsingConfig = DEFAULT_CONFIG
@@ -103,10 +94,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       browsing: {
         enabled: 'Boolean, true if module is active, false otherwise. When false nothing is captured, '
           + 'nothing is emitted even if a host asks, and anything already captured is discarded.',
-        capture_scope: "String: 'hops' (default) captures only visits rex-history's collector cannot "
-          + "see, which is the redirect intermediates this module exists for. 'all' captures the whole "
-          + 'visit graph, which duplicates ids rex-history already reports and costs a visit lookup on '
-          + 'every navigation. Change to all only to restore the earlier behaviour.',
         tab_opener_edges: 'Boolean, default true. Attributes the first visit in a new tab to the page '
           + 'that opened it, emitted as rex-browsing-opener points. Chrome records no referrer across '
           + 'a tab boundary, so without this a result opened in a new tab arrives from nowhere. Needs the '
@@ -116,37 +103,11 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
           + 'cannot be bounded and costs about a second on a page that re-records a visit every few '
           + 'seconds, charged per new tab. Raise it to keep attribution on a heavily revisited page, '
           + 'lower it if lookups are still costing participants, 0 to remove the ceiling entirely.',
-        capture_rules: [{
-          id: 'String, label emitted with each captured hop so rules can be told apart in analysis.',
-          host_suffix: 'String, matches this host exactly or any subdomain of it.',
-          path_prefix: 'String, matches when the visited path starts with this.'
-        }],
-        schemes: ['String, a URL scheme to capture, without the colon. Defaults to http and https. '
-          + 'Naming others (file, ftp, webdav) opts into them: they are not ordinary browsing, and a '
-          + 'local file path is a different kind of disclosure from a web page. Naming chrome, '
-          + 'chrome-untrusted or edge records the browser\'s own pages, which Chrome keeps out of '
-          + 'history, as rex-browsing-page points with no visit ids. Needs the tabs permission.'],
-        url_detail: "String: 'path' (default), 'none' or 'full'. 'path' keeps origin and pathname, which "
-          + "says what an intermediate was without the query string, where a redirector encodes its "
-          + "destination and a page may carry typed text. 'none' keeps ids only and discards the address "
-          + "as soon as the visit ids are resolved. 'full' keeps the whole address. Anything kept is redacted before it is emitted, using rex-history's lists when it "
-          + 'states any, otherwise browsing.redaction.',
-        debug: 'Boolean, forces url_detail to full in any build, for diagnosing a deployment. Logs a '
-          + 'warning while it is on so a configuration left in this state is visible.',
-        max_hop_age_days: 'Number, days after which a hop that was never emitted is discarded.',
-        capture_block_lists: ['String, rex-lists list name. A visit matching any of these is not '
-          + 'captured at all, and neither is a page that opens a tab, so an excluded page is never '
-          + 'looked up and its visit id never reaches a point. Takes precedence over '
-          + 'capture_allow_lists. A list that cannot be read blocks, so an unreadable list captures '
-          + 'less rather than more.'],
-        capture_allow_lists: ['String, rex-lists list name. When any are named, only visits matching '
-          + 'one of them are captured. Decides whether a visit is captured; redaction below decides '
-          + 'what a captured address looks like.'],
-        redaction: {
-          allow_lists: ['String, rex-lists list name. Applied only when rex-history states no lists.'],
-          filter_lists: ['String, rex-lists list name. Applied only when rex-history states no lists.'],
-          domain_only_lists: ['String, rex-lists list name. Applied only when rex-history states no lists.']
-        }
+        internal_pages: 'Boolean, default false. Records the browser\'s own pages (chrome://, '
+          + 'chrome-untrusted://, edge://), which Chrome keeps out of history, as rex-browsing-page '
+          + 'points with no visit ids. These addresses can carry text the participant typed. Needs '
+          + 'the tabs permission.',
+        max_hop_age_days: 'Number, days after which a record that was never emitted is discarded.'
       }
     }
   }
@@ -156,60 +117,23 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   async captureVisit(item: chrome.history.HistoryItem): Promise<boolean> {
-    // Checked here as well as by removing the listener, deliberately. An empty
-    // rule set means "capture everything" since capture inverted, so a disabled
-    // module that reached this point would collect rather than skip. Two
+    // Checked here as well as by removing the listener, deliberately: two
     // independent guards, and the failure direction of each is to collect
     // nothing.
-    if (!this.config.enabled || item.url === undefined) {
+    if (!this.config.enabled || item.url === undefined || !isRecordedScheme(item.url)) {
       return false
     }
 
-    const rule = this.captureRules.decide(item.url)
+    // Keyed by visit id, so capturing the same visit twice writes the same
+    // record rather than a duplicate.
+    const visit = await newestVisit(item.url)
 
-    if (rule === null) {
+    if (visit === null) {
       return false
     }
 
-    const at = item.lastVisitTime ?? Date.now()
-    const deferring = this.config.capture_scope !== 'all'
-    const candidate = { url: item.url, at, rule }
-
-    // These two run in one synchronous turn, in this order, before any await.
-    // Taking first is what stops this visit from answering its own question;
-    // holding before the first await is what lets the next visit find it, since
-    // Chrome orders onVisited only across handlers' synchronous parts.
-    const pending = deferring ? this.deferredVisits.takeAll() : []
-
-    if (deferring) {
-      this.deferredVisits.hold(candidate)
-    }
-
-    // Everything pending has now had a further navigation happen after it, so a
-    // client redirect it was part of has completed.
-    await this.reconsider(pending)
-
-    // Ahead of the visit lookup, which is the expensive call: an excluded host
-    // should cost nothing to exclude.
-    if (!(await this.captureLists.permits(item.url))) {
-      this.deferredVisits.drop(candidate)
-      return false
-    }
-
-    // Also ahead of it, and for the same reason. A visit rex-history can see is
-    // one it already reports with these same ids, so capturing it would spend a
-    // full getVisits() to duplicate a record we send anyway.
-    //
-    // Left held rather than discarded: a client redirector is still visible at
-    // this moment and stops being visible once it redirects, so the answer here
-    // is provisional. The next visit asks again.
-    if (deferring && await collectorCanSee(item.url, at)) {
-      return false
-    }
-
-    this.deferredVisits.drop(candidate)
-
-    return this.storeVisit(item.url, rule)
+    await this.visitStore.record(visit)
+    return true
   }
 
   /** A tab committed a URL Chrome may keep out of history. */
@@ -219,67 +143,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
 
     return this.internalPages.pageCommitted(tabId, url)
-  }
-
-  /** Capture the ones that have stopped being visible since they were held. */
-  private async reconsider(candidates: DeferredVisit[]): Promise<number> {
-    let captured = 0
-
-    for (const candidate of candidates) {
-      // The same gate the direct path applies, for the same reason. A held
-      // visit can be taken by the next visit before its own handler has reached
-      // that gate, so it has to be asked again here, ahead of the lookup.
-      if (!(await this.captureLists.permits(candidate.url))) {
-        continue
-      }
-
-      if (await collectorCanSee(candidate.url, candidate.at)) {
-        continue
-      }
-
-      if (await this.storeVisit(candidate.url, candidate.rule)) {
-        captured += 1
-      }
-    }
-
-    return captured
-  }
-
-  /**
-   * Settle whatever is still held, for a drain.
-   *
-   * The next visit is the ordinary signal, and it arrives milliseconds after a
-   * redirect. This covers the tail: a redirector whose destination never
-   * produced a visit has nothing else coming.
-   */
-  async reconsiderDeferred(): Promise<number> {
-    if (!this.config.enabled) {
-      this.deferredVisits.forgetAll()
-      return 0
-    }
-
-    return this.reconsider(this.deferredVisits.takeAll())
-  }
-
-  /**
-   * Resolve a URL's ids and keep the edge.
-   *
-   * Keyed by visit id, so capturing the same visit twice writes the same record
-   * rather than a duplicate — which is what lets the deferred path and the
-   * direct one overlap without coordinating.
-   */
-  private async storeVisit(url: string, rule: CaptureRule): Promise<boolean> {
-    const visit = await newestVisit(url)
-
-    if (visit === null) {
-      return false
-    }
-
-    // Store at the granularity that will be emitted, so the module never holds
-    // more of an address than it is configured to send. The address has done its
-    // job once the ids are resolved.
-    await this.hopStore.record(visit, urlAtDetail(visit.url, this.urlDetail()), rule)
-    return true
   }
 
   async drain(): Promise<number> {
@@ -292,17 +155,13 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.draining = true
 
     try {
-      // Settle any undecided visit before reading the store, so a hop that never
-      // got a following visit is emitted in this drain rather than the next one.
-      await this.reconsiderDeferred()
-
       // Sweep first, so a record past its age is discarded rather than sent.
       const cutoff = Date.now() - (this.config.max_hop_age_days * 24 * 60 * 60 * 1000)
-      await this.hopStore.sweep(cutoff)
+      await this.visitStore.sweep(cutoff)
       await this.openerStore.sweep(cutoff)
       await this.pageStore.sweep(cutoff)
 
-      const records = await this.hopStore.readAll()
+      const records = await this.visitStore.readAll()
       const openers = await this.openerStore.readAll()
       const pages = await this.pageStore.readAll()
       const emitted: string[] = []
@@ -310,61 +169,63 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       const emittedPages: string[] = []
 
       for (const record of records) {
-        const url = record.url === null ? undefined : await this.redactor.redact(record.url)
+        // Read at drain rather than at visit time, because onVisited often fires
+        // before the page's title is known.
+        const item = await historyItemFields(record.url)
 
         dispatchEvent({
           name: 'rex-browsing-visit',
+          url: record.url,
+          recorded_url: record.url,
+          domain: registeredDomain(record.url),
+          visit_time: record.visit_time,
+          transition_type: record.transition_type,
+          is_local: record.is_local,
+          date: record.visit_time,
           visit_id: record.visit_id,
           referring_visit_id: record.referring_visit_id,
-          visit_time: record.visit_time,
-          capture_rule: record.capture_rule,
-          date: record.visit_time,
-          ...(url === undefined ? {} : { url })
+          ...(item ?? { title: '' }),
+          ...(record.link ?? {})
         })
 
         emitted.push(record.visit_id)
       }
 
-      // Resolved against the hops read in this same drain, so a redirect chain
+      // Resolved against the visits read in this same drain, so a redirect chain
       // in the new tab attaches the edge to its root rather than its landing.
       for (const record of openers) {
         const root = chainRoot(record, records)
-        const url = root.url === null ? undefined : await this.redactor.redact(root.url)
 
         dispatchEvent({
           name: 'rex-browsing-opener',
           visit_id: root.visit_id,
           referring_visit_id: record.opener_visit_id,
           visit_time: root.visit_time,
-          capture_rule: record.capture_rule,
           transition: record.transition,
           date: root.visit_time,
-          ...(url === undefined ? {} : { url })
+          url: root.url
         })
 
         emittedOpeners.push(record.visit_id)
       }
 
       for (const record of pages) {
-        const url = record.url === null ? undefined : await this.redactor.redact(record.url)
-
         dispatchEvent({
           name: 'rex-browsing-page',
           visit_time: record.visit_time,
           tab_id: record.tab_id,
-          capture_rule: record.capture_rule,
           date: record.visit_time,
-          ...(url === undefined ? {} : { url })
+          url: record.url
         })
 
         emittedPages.push(record.page_id)
       }
 
       // Emit, then forget. A worker killed between the two re-emits next cycle;
-      // killed in the other order, the hop is gone. A duplicate is recoverable
+      // killed in the other order, the visit is gone. A duplicate is recoverable
       // in analysis, a loss is not.
       if (emitted.length > 0) {
-        await this.hopStore.forget(emitted)
+        await this.visitStore.forget(emitted)
       }
 
       if (emittedOpeners.length > 0) {
@@ -385,7 +246,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   /**
-   * `triggerBrowsingDrain` emits any stored hops now and responds with the
+   * `triggerBrowsingDrain` emits any stored records now and responds with the
    * count, so a host extension can drain on its own cadence rather than waiting
    * for the alarm.
    */
@@ -403,25 +264,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       .catch(() => sendResponse(0))
 
     return true
-  }
-
-  /**
-   * The detail actually in force.
-   *
-   * `debug` overrides `url_detail` in any build, deliberately: diagnosing a real
-   * deployment is exactly when full addresses are needed, so a flag that only
-   * worked in a development build would be useless where it matters. It announces
-   * itself in the log so a config left in this state is visible rather than
-   * silent.
-   */
-  urlDetail(): UrlDetail {
-    if (this.config.debug === true) {
-      console.warn('[rex-browsing] browsing.debug is on: emitting full addresses, '
-        + `overriding url_detail="${this.config.url_detail ?? 'path'}".`)
-      return 'full'
-    }
-
-    return this.config.url_detail ?? 'path'
   }
 
   /**
@@ -448,12 +290,8 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
    * and nothing to fake. Anything asynchronous a change implies is the caller's,
    * immediately after — see reconcileStore.
    */
-  updateConfiguration(section: Partial<BrowsingConfig> | undefined, history?: RedactionLists): void {
+  updateConfiguration(section: Partial<BrowsingConfig> | undefined): void {
     this.config = { ...DEFAULT_CONFIG, ...(section ?? {}) }
-    this.captureRules.update(this.config.capture_rules)
-    this.captureRules.setSchemes(this.config.schemes)
-    this.captureLists.update(this.config)
-    this.redactor.update(resolveRedactionLists(history, this.config.redaction))
 
     // Listening follows the enabled flag: a disabled module holds no listener at
     // all, rather than holding one that declines to act. Both calls are
@@ -553,37 +391,14 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.historyListener = null
   }
 
-  /**
-   * Settle what is already stored against the configuration now in force.
-   *
-   * Until configuration arrives the module has no rules and captures everything
-   * under CAPTURE_ALL; those provisional hops are resolved here.
-   */
+  /** Discard what is already stored when the configuration now in force disables the module. */
   async reconcileStore(): Promise<void> {
     if (!this.config.enabled) {
-      this.deferredVisits.forgetAll()
-
-      const discarded = await this.hopStore.clear() + await this.openerStore.clear()
+      const discarded = await this.visitStore.clear() + await this.openerStore.clear()
         + await this.pageStore.clear()
 
       if (discarded > 0) {
         console.log(`[rex-browsing] Disabled; discarded ${discarded} edge(s) captured before configuration.`)
-      }
-
-      return
-    }
-
-    if (this.captureRules.isNarrowed()) {
-      // A study that narrows asked for less, so give it less. These cannot be
-      // re-matched against the arriving rules: the address they would be tested
-      // on was discarded at capture, which is the point of not holding one.
-      const discarded = await this.hopStore.forgetByRule(CAPTURE_ALL.id)
-        + await this.openerStore.forgetByRule(CAPTURE_ALL.id)
-        + await this.pageStore.forgetByRule(CAPTURE_ALL.id)
-
-      if (discarded > 0) {
-        console.log(`[rex-browsing] Narrowed by configuration; discarded ${discarded} hop(s) `
-          + 'captured before it arrived.')
       }
     }
   }
@@ -593,10 +408,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     try {
       const all = await rexCorePlugin.fetchConfiguration() as Record<string, unknown> | undefined
 
-      this.updateConfiguration(
-        all?.['browsing'] as Partial<BrowsingConfig> | undefined,
-        all?.['history'] as RedactionLists | undefined
-      )
+      this.updateConfiguration(all?.['browsing'] as Partial<BrowsingConfig> | undefined)
 
       await this.reconcileStore()
     } catch (error) {

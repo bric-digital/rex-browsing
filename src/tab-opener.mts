@@ -19,11 +19,9 @@
  * edge for the same visit can both be held.
  */
 
-import { urlAtDetail, type CaptureRules, type UrlDetail } from './capture-rules.mjs'
-import type { CaptureLists } from './capture-lists.mjs'
 import { EdgeStore, type StoredEdge } from './edge-store.mjs'
-import type { HopRecord } from './hop-store.mjs'
-import { newestVisit, visitCount } from './visit-lookup.mjs'
+import type { VisitRecord } from './visit-store.mjs'
+import { isRecordedScheme, newestVisit, visitCount } from './visit-lookup.mjs'
 
 const KEY_PREFIX = 'rexBrowsingOpener:'
 
@@ -39,7 +37,7 @@ export interface OpenerRecord extends StoredEdge {
   referring_visit_id: string;
   /** The newest visit of the opener tab's page when the tab was created. */
   opener_visit_id: string;
-  url: string | null;
+  url: string;
   transition: string;
 }
 
@@ -59,14 +57,14 @@ export class OpenerStore extends EdgeStore<OpenerRecord> {
  * The visit an opener edge should attach to.
  *
  * The first URL a tab commits may be the landing of a redirect chain whose root
- * is a hop this module captured. Chrome recorded "0" on that root, not on the
+ * is a redirect step this module recorded. Chrome recorded "0" on that root, not on the
  * landing, so the edge belongs there: it fills exactly the gap Chrome left, and
  * landing -> hop -> opener is then walkable end to end. If the root is not
- * among the hops held, the edge stays on the first committed visit.
+ * among the visits held, the edge stays on the first committed visit.
  */
-export function chainRoot(record: OpenerRecord, hops: HopRecord[]): { visit_id: string; visit_time: number; url: string | null } {
-  const byId = new Map(hops.map((hop) => [hop.visit_id, hop]))
-  let current: { visit_id: string; referring_visit_id: string; visit_time: number; url: string | null } = record
+export function chainRoot(record: OpenerRecord, visits: VisitRecord[]): { visit_id: string; visit_time: number; url: string } {
+  const byId = new Map(visits.map((visit) => [visit.visit_id, visit]))
+  let current: { visit_id: string; referring_visit_id: string; visit_time: number; url: string } = record
 
   // Bounded, so a cycle in stored data cannot hang the drain.
   for (let steps = 0; steps < 16; steps += 1) {
@@ -83,10 +81,7 @@ export function chainRoot(record: OpenerRecord, hops: HopRecord[]): { visit_id: 
 }
 
 export interface TabOpenerDependencies {
-  rules: CaptureRules;
-  lists: CaptureLists;
   store: OpenerStore;
-  urlDetail: () => UrlDetail;
   /** Ceiling on an opener's visit count; non-positive means no ceiling. */
   maxOpenerVisits: () => number;
 }
@@ -105,8 +100,8 @@ export class TabOpenerTracker {
    * not lose it.
    *
    * The lookup starts here rather than in `tabNavigated()`, which means a new tab
-   * the capture rules or lists then exclude has already paid for one it will not
-   * use. That is deliberate. It came up while investigating AI-Extension#124,
+   * whose first page is not recorded has already paid for one it will not use.
+   * That is deliberate. It came up while investigating AI-Extension#124,
    * which reported the cost of this lookup but not this part of it. Deferring would
    * resolve the opener's NEWEST visit at navigation time instead of at creation
    * time, and on the pages this matters for — a dashboard re-recording a visit
@@ -151,13 +146,7 @@ export class TabOpenerTracker {
       return false
     }
 
-    const rule = this.deps.rules.decide(url)
-
-    if (rule === null) {
-      return false
-    }
-
-    if (!(await this.deps.lists.permits(url))) {
+    if (!isRecordedScheme(url)) {
       return false
     }
 
@@ -178,9 +167,8 @@ export class TabOpenerTracker {
       referring_visit_id: visit.referringVisitId,
       opener_visit_id: openerVisitId,
       visit_time: visit.visitTime,
-      url: urlAtDetail(url, this.deps.urlDetail()),
-      capture_rule: rule.id,
-      transition: visit.transition ?? ''
+      url,
+      transition: visit.transition
     })
 
     return true
@@ -198,9 +186,8 @@ export class TabOpenerTracker {
   /**
    * The opener tab's current visit, or null when it has no page worth
    * attributing to: a blank tab, an extension page, a host without the `tabs`
-   * permission (Chrome then reports no URL), a page the capture lists exclude,
-   * or a tab that has already gone. The URL is used to resolve the id and then
-   * dropped.
+   * permission (Chrome then reports no URL), or a tab that has already gone.
+   * The URL is used to resolve the id and then dropped.
    */
   private async resolveOpenerVisit(openerTabId: number): Promise<string | null> {
     let url: string | undefined
@@ -211,15 +198,7 @@ export class TabOpenerTracker {
       return null
     }
 
-    if (url === undefined || url === '' || this.deps.rules.decide(url) === null) {
-      return null
-    }
-
-    // Ahead of the visit lookup, which is the expensive call: `getVisits()`
-    // returns every visit the URL has ever had, and an opener is exactly the
-    // kind of page that accumulates them. An excluded host should cost nothing
-    // to exclude, and its visit id has no business reaching an emitted point.
-    if (!(await this.deps.lists.permits(url))) {
+    if (url === undefined || !isRecordedScheme(url)) {
       return null
     }
 
@@ -237,15 +216,11 @@ export class TabOpenerTracker {
    *
    * The ceiling exists because `getVisits()` cannot be bounded: a page that
    * re-records a visit every few seconds costs about a second to resolve, and
-   * the opener path pays it per new tab. A block list would also stop it, but
-   * only once somebody has noticed the page and named it, and here noticing cost
-   * a participant who uninstalled. This catches the page nobody has named yet.
+   * the opener path pays it per new tab.
    *
-   * Fails toward looking up, which is the opposite of the list gate above, and
-   * deliberately so. The lists decide what may be collected, so an unreadable
-   * one has to block. This decides only what is affordable, so an unanswered
-   * question leaves behaviour as it was rather than dropping an edge that was
-   * wanted.
+   * Fails toward looking up. This decides only what is affordable, so an
+   * unanswered question leaves behaviour as it was rather than dropping an edge
+   * that was wanted.
    */
   private async tooManyVisits(url: string): Promise<boolean> {
     const ceiling = this.deps.maxOpenerVisits()

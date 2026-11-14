@@ -7,14 +7,10 @@
  * the committed URL, so the page is recorded from there, with the time it was
  * seen. AI-Extension#132.
  *
- * Opt-in through `schemes`, like any scheme beyond http and https: these
- * addresses can carry text the participant typed, such as
- * `chrome://history/?q=`. Schemes Chrome does record in history (`file`,
- * `chrome-extension`) are left to the history path, which has the ids.
+ * Opt-in through `internal_pages`: these addresses can carry text the
+ * participant typed, such as `chrome://history/?q=`.
  */
 
-import { urlAtDetail, type CaptureRules, type UrlDetail } from './capture-rules.mjs'
-import type { CaptureLists } from './capture-lists.mjs'
 import { EdgeStore, type StoredRecord } from './edge-store.mjs'
 
 const KEY_PREFIX = 'rexBrowsingPage:'
@@ -25,7 +21,7 @@ export const UNRECORDED_SCHEMES = ['chrome', 'chrome-untrusted', 'edge']
 export interface PageRecord extends StoredRecord {
   page_id: string;
   tab_id: number;
-  url: string | null;
+  url: string;
 }
 
 export class PageStore extends EdgeStore<PageRecord> {
@@ -35,32 +31,20 @@ export class PageStore extends EdgeStore<PageRecord> {
 }
 
 export interface InternalPageDependencies {
-  rules: CaptureRules;
-  lists: CaptureLists;
   store: PageStore;
-  urlDetail: () => UrlDetail;
+  /** The study's `internal_pages` setting. */
+  wanted: () => boolean;
 }
 
 export class InternalPageRecorder {
   constructor(private readonly deps: InternalPageDependencies) {}
 
-  /** True when the study names any scheme this recorder serves. */
   isWanted(): boolean {
-    return UNRECORDED_SCHEMES.some((scheme) => this.deps.rules.capturesScheme(scheme))
+    return this.deps.wanted()
   }
 
   async pageCommitted(tabId: number, url: string): Promise<boolean> {
-    if (!isUnrecorded(url)) {
-      return false
-    }
-
-    const rule = this.deps.rules.decide(url)
-
-    if (rule === null) {
-      return false
-    }
-
-    if (!(await this.deps.lists.permits(url))) {
+    if (!this.isWanted() || !isUnrecorded(url)) {
       return false
     }
 
@@ -70,8 +54,7 @@ export class InternalPageRecorder {
       page_id: `${tabId}:${seenAt}`,
       tab_id: tabId,
       visit_time: seenAt,
-      url: urlAtDetail(url, this.deps.urlDetail()),
-      capture_rule: rule.id
+      url
     })
 
     return true

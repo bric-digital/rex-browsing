@@ -15,8 +15,6 @@ import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-const GOOGLE_RULES = [{ id: 'google-goto', host_suffix: 'google.com', path_prefix: '/goto' }]
-
 
 test.describe('rex-browsing — real extension', () => {
   test.describe.configure({ mode: 'serial' })
@@ -40,11 +38,9 @@ test.describe('rex-browsing — real extension', () => {
         // the keyboard; it still takes focus briefly on launch.
         '--window-position=-3000,-3000',
         '--window-size=800,600',
-        // Gives the local server a name that rex-lists will match. Domain list
-        // matching resolves a registrable domain, and returns null for both
-        // "localhost" and "127.0.0.1" (probed 2026-09-17), so a list cannot name
-        // either one. example.com is IANA-reserved, so the name cannot collide
-        // with anything real.
+        // Gives the local server a name with a registered domain, which neither
+        // "localhost" nor "127.0.0.1" has. example.com is IANA-reserved, so the
+        // name cannot collide with anything real.
         '--host-resolver-rules=MAP dashboard.example.com 127.0.0.1'
       ]
     })
@@ -71,264 +67,102 @@ test.describe('rex-browsing — real extension', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Capture rules
-  // -------------------------------------------------------------------------
-
-  test('matches a Google goto hop', async () => {
-    const matched = await serviceWorker.evaluate((rules) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
-      const rule = p.captureRules.decide('https://www.google.com/goto?url=CAESUgHrOzAV')
-      return rule ? rule.id : null
-    }, GOOGLE_RULES)
-
-    expect(matched).toBe('google-goto')
-  })
-
-  test('does not match an ordinary Google search page', async () => {
-    const matched = await serviceWorker.evaluate((rules) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
-      return p.captureRules.decide('https://www.google.com/search?q=home+depot')
-    }, GOOGLE_RULES)
-
-    expect(matched).toBeNull()
-  })
-
-  test('does not match a lookalike host', async () => {
-    const matched = await serviceWorker.evaluate((rules) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
-      return p.captureRules.decide('https://notgoogle.com/goto?url=x')
-    }, GOOGLE_RULES)
-
-    expect(matched).toBeNull()
-  })
-
-  test('ignores a malformed URL instead of throwing', async () => {
-    const matched = await serviceWorker.evaluate((rules) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
-      return p.captureRules.decide('not a url')
-    }, GOOGLE_RULES)
-
-    expect(matched).toBeNull()
-  })
-
-  test('with no rules configured, captures any http visit', async () => {
-    const decisions = await serviceWorker.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update([])
-      return {
-        narrowed: p.captureRules.isNarrowed(),
-        goto: p.captureRules.decide('https://www.google.com/goto?url=CAES')?.id ?? null,
-        ordinary: p.captureRules.decide('https://example.com/some/page')?.id ?? null,
-        insecure: p.captureRules.decide('http://example.com/')?.id ?? null,
-      }
-    })
-
-    expect(decisions.narrowed).toBe(false)
-    expect(decisions.goto).toBe('all')
-    expect(decisions.ordinary).toBe('all')
-    expect(decisions.insecure).toBe('all')
-  })
-
-  test('skips non-http schemes unless asked for them', async () => {
-    const decisions = await serviceWorker.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update([])
-      p.captureRules.setSchemes(['http', 'https'])
-      return [
-        p.captureRules.decide('chrome://history/'),
-        p.captureRules.decide('file:///Users/someone/private.pdf'),
-        p.captureRules.decide('chrome-extension://abc/page.html'),
-      ]
-    })
-
-    expect(decisions).toEqual([null, null, null])
-  })
-
-  test('other schemes are captured only when named, and are not by default', async () => {
-    const result = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.set({ REXConfiguration: {} })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-      const configuredDefault = p.currentConfig().schemes
-      const byDefault = p.captureRules.decide('file:///Users/someone/private.pdf')
-
-      await chrome.storage.local.set({
-        REXConfiguration: { browsing: { schemes: ['http', 'https', 'file', 'CHROME'] } }
-      })
-      await p.refreshConfiguration()
-
-      return {
-        configuredDefault,
-        byDefault,
-        file: p.captureRules.decide('file:///Users/someone/private.pdf')?.id ?? null,
-        // Named in mixed case in the config above, matched case-insensitively.
-        chromeUrl: p.captureRules.decide('chrome://history/')?.id ?? null,
-        stillSkipsGarbage: p.captureRules.decide('not a url'),
-      }
-    })
-
-    expect(result.configuredDefault).toEqual(['http', 'https'])
-    expect(result.byDefault).toBeNull()
-    expect(result.file).toBe('all')
-    expect(result.chromeUrl).toBe('all')
-    // An unparseable value is still not a visit, whatever the scheme setting.
-    expect(result.stillSkipsGarbage).toBeNull()
-  })
-
-  test('rules narrow capture rather than enabling it', async () => {
-    const decisions = await serviceWorker.evaluate((rules) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
-      return {
-        narrowed: p.captureRules.isNarrowed(),
-        matching: p.captureRules.decide('https://www.google.com/goto?url=CAES')?.id ?? null,
-        other: p.captureRules.decide('https://example.com/some/page')?.id ?? null,
-      }
-    }, GOOGLE_RULES)
-
-    expect(decisions.narrowed).toBe(true)
-    expect(decisions.matching).toBe('google-goto')
-    // Captured when unnarrowed, skipped once a study states rules.
-    expect(decisions.other).toBeNull()
-  })
-
-  test('does not hold the URL when it will not be emitted', async () => {
-    const stored = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.set({ REXConfiguration: { browsing: { url_detail: 'none' } } })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-
-      const real = chrome.history.getVisits
-      chrome.history.getVisits = async () => ([
-        { id: '1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true }
-      ]) as never
-      try {
-        await p.captureVisit({ id: '1', url: 'https://example.com/private/page?token=secret' })
-      } finally {
-        chrome.history.getVisits = real
-      }
-
-      return await p.hopStore.readAll()
-    })
-
-    expect(stored).toHaveLength(1)
-    // The address did its job resolving the ids and is not kept.
-    expect(stored[0].url).toBeNull()
-    expect(stored[0].visit_id).toBe('5')
-  })
-
-  test('host matching is case-insensitive, and * matches any host', async () => {
-    const decisions = await serviceWorker.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.setSchemes(['http', 'https'])
-
-      // DNS is case-insensitive, so a rule written in any case must match.
-      p.captureRules.update([{ id: 'mixed', host_suffix: 'GOOGLE.com', path_prefix: '/goto' }])
-      const upperRule = p.captureRules.decide('https://WWW.Google.COM/goto?url=x')?.id ?? null
-      const stillNotLookalike = p.captureRules.decide('https://notgoogle.com/goto')
-
-      // `*` is what CAPTURE_ALL uses; it must also work written in config.
-      p.captureRules.update([{ id: 'any', host_suffix: '*', path_prefix: '/goto' }])
-      const wildcard = p.captureRules.decide('https://anything.example/goto')?.id ?? null
-      const wildcardWrongPath = p.captureRules.decide('https://anything.example/other')
-
-      return { upperRule, stillNotLookalike, wildcard, wildcardWrongPath }
-    })
-
-    expect(decisions.upperRule).toBe('mixed')
-    expect(decisions.stillNotLookalike).toBeNull()
-    expect(decisions.wildcard).toBe('any')
-    expect(decisions.wildcardWrongPath).toBeNull()
-  })
-
-  // -------------------------------------------------------------------------
   // Capture
   // -------------------------------------------------------------------------
 
-  test('stores a hop under its own key', async () => {
-    const stored = await serviceWorker.evaluate(async (rules) => {
+  test('stores a visit under its own key', async () => {
+    const stored = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
+      p.updateConfiguration({ enabled: true })
       const real = chrome.history.getVisits
       chrome.history.getVisits = async () => ([
         { id: '1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true }
       ]) as never
       try {
-        await p.captureVisit({ id: '1', url: 'https://www.google.com/goto?url=CAES' })
+        await p.captureVisit({ id: '1', url: 'https://www.example.com/any/page?q=1' })
       } finally {
         chrome.history.getVisits = real
       }
       const all = await chrome.storage.local.get()
       return Object.keys(all).filter((key) => key.startsWith('rexBrowsingVisit:'))
-    }, GOOGLE_RULES)
+    })
 
     expect(stored).toEqual(['rexBrowsingVisit:5'])
   })
 
-  test('ignores a visit that matches no rule', async () => {
-    const stored = await serviceWorker.evaluate(async (rules) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
-      await p.captureVisit({ id: '1', url: 'https://www.google.com/search?q=x' })
-      return await p.hopStore.readAll()
-    }, GOOGLE_RULES)
-
-    expect(stored).toHaveLength(0)
-  })
-
   test('captures even when no configuration has loaded', async () => {
-    const stored = await serviceWorker.evaluate(async (rules) => {
+    const stored = await serviceWorker.evaluate(async () => {
       await chrome.storage.local.remove('REXConfiguration')
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
       const real = chrome.history.getVisits
       chrome.history.getVisits = async () => ([
         { id: '1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true }
       ]) as never
       try {
-        await p.captureVisit({ id: '1', url: 'https://www.google.com/goto?url=CAES' })
+        await p.captureVisit({ id: '1', url: 'https://www.example.com/any/page' })
       } finally {
         chrome.history.getVisits = real
       }
-      return await p.hopStore.readAll()
-    }, GOOGLE_RULES)
+      return await p.visitStore.readAll()
+    })
 
     expect(stored).toHaveLength(1)
   })
 
-  test('concurrent captures do not overwrite each other', async () => {
-    const count = await serviceWorker.evaluate(async (rules) => {
+  test('does not record non-http schemes as visits', async () => {
+    const result = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      p.captureRules.update(rules)
+      p.updateConfiguration({ enabled: true })
+      const real = chrome.history.getVisits
+      let visitId = 0
+      chrome.history.getVisits = async () => {
+        visitId += 1
+        return [{ id: '1', visitId: String(visitId), referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true }] as never
+      }
+      try {
+        return {
+          data: await p.captureVisit({ id: '1', url: 'data:text/html,<p>hello</p>' }),
+          file: await p.captureVisit({ id: '2', url: 'file:///Users/someone/private.pdf' }),
+          extension: await p.captureVisit({ id: '3', url: 'chrome-extension://abc/page.html' }),
+          http: await p.captureVisit({ id: '4', url: 'http://example.com/' }),
+          https: await p.captureVisit({ id: '5', url: 'https://example.com/' }),
+          stored: (await p.visitStore.readAll()).map((r: { url: string }) => r.url).sort()
+        }
+      } finally {
+        chrome.history.getVisits = real
+      }
+    })
+
+    expect(result.data).toBe(false)
+    expect(result.file).toBe(false)
+    expect(result.extension).toBe(false)
+    // Positive control: the same stubbed lookup does record the web schemes.
+    expect(result.http).toBe(true)
+    expect(result.https).toBe(true)
+    expect(result.stored).toEqual(['http://example.com/', 'https://example.com/'])
+  })
+
+  test('concurrent captures do not overwrite each other', async () => {
+    const count = await serviceWorker.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = (self as any).rexBrowsingPlugin
       const writes = []
       for (let index = 0; index < 20; index += 1) {
-        writes.push(p.hopStore.record(
-          { visitId: String(index), referringVisitId: String(index - 1), visitTime: Date.now() + index },
-          `https://www.google.com/goto?url=CAES${index}`,
-          rules[0]
-        ))
+        writes.push(p.visitStore.record({
+          url: `https://www.example.com/page${index}`,
+          visitId: String(index),
+          referringVisitId: String(index - 1),
+          visitTime: Date.now() + index,
+          transition: 'link',
+          isLocal: true
+        }))
       }
       await Promise.all(writes)
-      return (await p.hopStore.readAll()).length
-    }, GOOGLE_RULES)
+      return (await p.visitStore.readAll()).length
+    })
 
     expect(count).toBe(20)
   })
@@ -337,69 +171,73 @@ test.describe('rex-browsing — real extension', () => {
   // Drain
   // -------------------------------------------------------------------------
 
-  test('emits one point per stored hop, ids only, and clears the store', async () => {
-    const result = await serviceWorker.evaluate(async (rules) => {
+  test('emits one point per stored visit and clears the store', async () => {
+    const result = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      // Stored with no address, as url_detail 'none' stores them.
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, null, rules[0])
-      await p.hopStore.record({ visitId: '9', referringVisitId: '8', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, null, rules[0])
+      p.updateConfiguration({ enabled: true })
+      await p.visitStore.record({ url: 'https://www.example.com/a?q=1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true })
+      await p.visitStore.record({ url: 'https://www.example.com/b', visitId: '9', referringVisitId: '8', visitTime: Date.now(), transition: 'typed', isLocal: false })
 
       const count = await p.drain()
-      const remaining = await p.hopStore.readAll()
+      const remaining = await p.visitStore.readAll()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const events = (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
       return { count, remaining: remaining.length, events }
-    }, GOOGLE_RULES)
+    })
 
     expect(result.count).toBe(2)
     expect(result.remaining).toBe(0)
     expect(result.events).toHaveLength(2)
-    expect(result.events[0].visit_id).toBe('5')
-    expect(result.events[0].referring_visit_id).toBe('4')
-    expect(result.events[0].capture_rule).toBe('google-goto')
-    expect(result.events[0].url).toBeUndefined()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const first = result.events.find((e: any) => e.visit_id === '5')
+    expect(first.referring_visit_id).toBe('4')
+    expect(first.url).toBe('https://www.example.com/a?q=1')
+    expect(first.recorded_url).toBe('https://www.example.com/a?q=1')
+    expect(first.transition_type).toBe('link')
+    expect(first.is_local).toBe(true)
+    expect(first).not.toHaveProperty('capture_rule')
   })
 
-  test('a hop stranded by a worker kill is emitted after restart', async () => {
-    const emitted = await serviceWorker.evaluate(async (rules) => {
+  test('a visit stranded by a worker kill is emitted after restart', async () => {
+    const emitted = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
+      await p.visitStore.record({ url: 'https://www.example.com/a', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true })
 
       // A worker killed mid-drain leaves the guard set in the dead instance. The
-      // replacement reconstructs it clear, and the stored hop is still there.
+      // replacement reconstructs it clear, and the stored visit is still there.
       p.simulateDrainInterrupted(true)
       p.simulateWorkerRestart()
 
       return await p.drain()
-    }, GOOGLE_RULES)
+    })
 
     expect(emitted).toBe(1)
   })
 
   test('a second drain during the first is refused, not queued', async () => {
-    const counts = await serviceWorker.evaluate(async (rules) => {
+    const counts = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
+      await p.visitStore.record({ url: 'https://www.example.com/a', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true })
       return await Promise.all([p.drain(), p.drain()])
-    }, GOOGLE_RULES)
+    })
 
     expect(counts.filter((count) => count > 0)).toHaveLength(1)
     expect(counts).toContain(0)
   })
 
-  test('sweep drops hops older than the cutoff', async () => {
-    const remaining = await serviceWorker.evaluate(async (rules) => {
+  test('sweep drops visits older than the cutoff', async () => {
+    const remaining = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
       const old = Date.now() - 60_000
-      await p.hopStore.record({ visitId: '1', referringVisitId: '0', visitTime: old, url: 'x', url: 'https://www.google.com/goto?u' }, null, rules[0])
-      await p.hopStore.record({ visitId: '2', referringVisitId: '1', visitTime: Date.now(), url: 'x', url: 'https://www.google.com/goto?u' }, null, rules[0])
-      await p.hopStore.sweep(Date.now() - 30_000)
-      return (await p.hopStore.readAll()).map((r: { visit_id: string }) => r.visit_id)
-    }, GOOGLE_RULES)
+      await p.visitStore.record({ url: 'https://www.example.com/a', visitId: '1', referringVisitId: '0', visitTime: old, transition: 'link', isLocal: true })
+      await p.visitStore.record({ url: 'https://www.example.com/b', visitId: '2', referringVisitId: '1', visitTime: Date.now(), transition: 'link', isLocal: true })
+      await p.visitStore.sweep(Date.now() - 30_000)
+      return (await p.visitStore.readAll()).map((r: { visit_id: string }) => r.visit_id)
+    })
 
     expect(remaining).toEqual(['2'])
   })
@@ -408,7 +246,7 @@ test.describe('rex-browsing — real extension', () => {
   // Configuration
   // -------------------------------------------------------------------------
 
-  test('narrows nothing when the server sends no configuration', async () => {
+  test('has no narrowing settings when the server sends no configuration', async () => {
     const config = await serviceWorker.evaluate(async () => {
       await chrome.storage.local.set({ REXConfiguration: {} })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -418,12 +256,11 @@ test.describe('rex-browsing — real extension', () => {
     })
 
     expect(config.enabled).toBe(true)
-    expect(config.url_detail).toBe('path')
-    expect(config.debug).toBe(false)
-    // No rules by default: capture the whole graph, let a study narrow it. Naming
-    // sites here would make the module's default a client override, and would
-    // leave any redirector nobody has seen yet silently uncollected.
-    expect(config.capture_rules).toEqual([])
+    expect(config.internal_pages).toBe(false)
+    for (const removed of ['capture_scope', 'capture_rules', 'capture_block_lists', 'capture_allow_lists',
+      'schemes', 'url_detail', 'debug', 'redaction']) {
+      expect(config).not.toHaveProperty(removed)
+    }
   })
 
   test('server configuration replaces the defaults', async () => {
@@ -432,8 +269,8 @@ test.describe('rex-browsing — real extension', () => {
         REXConfiguration: {
           browsing: {
             enabled: true,
-            capture_rules: [{ id: 'example', host_suffix: 'example.com', path_prefix: '/r' }],
-            url_detail: 'none',
+            internal_pages: true,
+            max_opener_visits: 10,
             max_hop_age_days: 3
           }
         }
@@ -444,17 +281,18 @@ test.describe('rex-browsing — real extension', () => {
       return p.currentConfig()
     })
 
-    expect(config.capture_rules).toHaveLength(1)
-    expect(config.capture_rules[0].id).toBe('example')
+    expect(config.internal_pages).toBe(true)
+    expect(config.max_opener_visits).toBe(10)
+    expect(config.max_hop_age_days).toBe(3)
   })
 
-  test('triggerBrowsingDrain emits stored hops and answers with the count', async () => {
-    const result = await serviceWorker.evaluate(async (rules) => {
+  test('triggerBrowsingDrain emits stored visits and answers with the count', async () => {
+    const result = await serviceWorker.evaluate(async () => {
       await chrome.storage.local.set({ REXConfiguration: {} })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
       await p.refreshConfiguration()
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
+      await p.visitStore.record({ url: 'https://www.example.com/a', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(self as any).__capturedEvents = []
 
@@ -462,8 +300,8 @@ test.describe('rex-browsing — real extension', () => {
         p.handleMessage({ messageType: 'triggerBrowsingDrain' }, null, resolve)
       })
 
-      return { count, remaining: (await p.hopStore.readAll()).length }
-    }, GOOGLE_RULES)
+      return { count, remaining: (await p.visitStore.readAll()).length }
+    })
 
     expect(result.count).toBe(1)
     expect(result.remaining).toBe(0)
@@ -479,69 +317,31 @@ test.describe('rex-browsing — real extension', () => {
     expect(claimed).toBe(false)
   })
 
-  test("url_detail 'full' puts the whole address on the emitted point", async () => {
-    const events = await serviceWorker.evaluate(async (rules) => {
-      await chrome.storage.local.set({
-        REXConfiguration: {
-          browsing: {
-            enabled: true,
-            capture_rules: rules,
-            url_detail: 'full',
-            max_hop_age_days: 7
-          }
-        }
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(self as any).__capturedEvents = []
-      await p.drain()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
-    }, GOOGLE_RULES)
-
-    expect(events).toHaveLength(1)
-    expect(events[0].url).toBe('https://www.google.com/goto?url=CAES')
-  })
-
   test('disabling the module stops capture', async () => {
-    const stored = await serviceWorker.evaluate(async (rules) => {
-      await chrome.storage.local.set({
-        REXConfiguration: {
-          browsing: {
-            enabled: false,
-            capture_rules: rules,
-            url_detail: 'none',
-            max_hop_age_days: 7
-          }
-        }
-      })
+    const stored = await serviceWorker.evaluate(async () => {
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
       await p.refreshConfiguration()
-      await p.captureVisit({ id: '1', url: 'https://www.google.com/goto?url=CAES' })
-      return await p.hopStore.readAll()
-    }, GOOGLE_RULES)
+      await p.captureVisit({ id: '1', url: 'https://www.example.com/a' })
+      return await p.visitStore.readAll()
+    })
 
     expect(stored).toHaveLength(0)
   })
 
-  test('a disabled module emits nothing, including hops captured before config arrived', async () => {
-    // Capture rules are seeded with the defaults before configuration loads, so a
-    // cold worker does not miss hops. On an arm where the module is disabled that
-    // window can still capture, and the host calls triggerBrowsingDrain on its
-    // own cadence — so "disabled" has to mean nothing is emitted, not merely that
-    // the drain alarm is never scheduled.
-    const result = await serviceWorker.evaluate(async (rules) => {
+  test('a disabled module emits nothing, including visits captured before config arrived', async () => {
+    // The listener is registered before configuration loads, so a cold worker
+    // does not miss visits. On an arm where the module is disabled that window
+    // can still capture, and the host calls triggerBrowsingDrain on its own
+    // cadence — so "disabled" has to mean nothing is emitted, not merely that the
+    // drain alarm is never scheduled.
+    const result = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
+      await p.visitStore.record({ url: 'https://www.example.com/a', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true })
 
-      await chrome.storage.local.set({
-        REXConfiguration: { browsing: { enabled: false, capture_rules: rules } }
-      })
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
       await p.refreshConfiguration()
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -556,9 +356,9 @@ test.describe('rex-browsing — real extension', () => {
         viaAlarm,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         emitted: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit').length,
-        stillStored: (await p.hopStore.readAll()).length,
+        stillStored: (await p.visitStore.readAll()).length,
       }
-    }, GOOGLE_RULES)
+    })
 
     expect(result.emitted).toBe(0)
     expect(result.viaMessage).toBe(0)
@@ -567,19 +367,17 @@ test.describe('rex-browsing — real extension', () => {
     expect(result.stillStored).toBe(0)
   })
 
-  test('a disabled module refuses to drain a hop that arrives after it was turned off', async () => {
+  test('a disabled module refuses to drain a visit that arrives after it was turned off', async () => {
     // Isolates the drain guard from the purge. The purge empties the store at
-    // configuration time; this covers a hop reaching the store afterwards, which
-    // the guard is the only thing standing in front of.
-    const result = await serviceWorker.evaluate(async (rules) => {
-      await chrome.storage.local.set({
-        REXConfiguration: { browsing: { enabled: false, capture_rules: rules } }
-      })
+    // configuration time; this covers a visit reaching the store afterwards,
+    // which the guard is the only thing standing in front of.
+    const result = await serviceWorker.evaluate(async () => {
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
       await p.refreshConfiguration()
 
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
+      await p.visitStore.record({ url: 'https://www.example.com/a', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true })
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(self as any).__capturedEvents = []
@@ -590,132 +388,10 @@ test.describe('rex-browsing — real extension', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         emitted: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit').length,
       }
-    }, GOOGLE_RULES)
+    })
 
     expect(result.drained).toBe(0)
     expect(result.emitted).toBe(0)
-  })
-
-  test('narrowing discards hops captured before configuration arrived', async () => {
-    const result = await serviceWorker.evaluate(async (rules) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-
-      // Two hops as a cold worker would have them: one caught before any rules
-      // existed, one under a rule the study went on to state.
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, null,
-        { id: 'all', host_suffix: '*', path_prefix: '' })
-      await p.hopStore.record({ visitId: '9', referringVisitId: '8', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, null, rules[0])
-
-      await chrome.storage.local.set({ REXConfiguration: { browsing: { capture_rules: rules } } })
-      await p.refreshConfiguration()
-
-      return (await p.hopStore.readAll()).map((h: { visit_id: string, capture_rule: string }) =>
-        [h.visit_id, h.capture_rule])
-    }, GOOGLE_RULES)
-
-    // The provisional one goes; the one the study asked for stays.
-    expect(result).toEqual([['9', 'google-goto']])
-  })
-
-  test('an unnarrowed study keeps what was captured before configuration', async () => {
-    const result = await serviceWorker.evaluate(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, null,
-        { id: 'all', host_suffix: '*', path_prefix: '' })
-
-      await chrome.storage.local.set({ REXConfiguration: { browsing: {} } })
-      await p.refreshConfiguration()
-
-      return (await p.hopStore.readAll()).length
-    })
-
-    // Nothing was narrowed, so nothing was asked to be dropped.
-    expect(result).toBe(1)
-  })
-
-  // -------------------------------------------------------------------------
-  // Redaction (include_url only)
-  // -------------------------------------------------------------------------
-
-  test("rex-history's lists win when it states any", async () => {
-    const lists = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.set({
-        REXConfiguration: {
-          history: { allow_lists: ['history-allow'], filter_lists: [], domain_only_lists: [] },
-          browsing: { redaction: { allow_lists: ['our-own'] } }
-        }
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-      return p.redactor.configuredLists()
-    })
-
-    expect(lists.allow_lists).toEqual(['history-allow'])
-  })
-
-  test('our own lists apply only when rex-history states none', async () => {
-    const lists = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.set({
-        REXConfiguration: {
-          history: { allow_lists: [], filter_lists: [], domain_only_lists: [] },
-          browsing: { redaction: { allow_lists: ['our-own'] } }
-        }
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-      return p.redactor.configuredLists()
-    })
-
-    expect(lists.allow_lists).toEqual(['our-own'])
-  })
-
-  test('a URL off a configured allow-list is redacted before it is emitted', async () => {
-    const events = await serviceWorker.evaluate(async (rules) => {
-      await chrome.storage.local.set({
-        REXConfiguration: {
-          history: { allow_lists: ['nonempty-list'], filter_lists: [], domain_only_lists: [] },
-          browsing: { capture_rules: rules, url_detail: 'full' }
-        }
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(self as any).__capturedEvents = []
-      await p.drain()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
-    }, GOOGLE_RULES)
-
-    // The list is empty in IndexedDB, so nothing matches it. An allow-list that
-    // matches nothing must redact rather than pass the URL through.
-    expect(events).toHaveLength(1)
-    expect(events[0].url).toBe('CATEGORY:NOT_ON_ALLOWLIST')
-    expect(events[0].visit_id).toBe('5')
-  })
-
-  test('with no lists anywhere, a kept address is emitted unchanged', async () => {
-    const events = await serviceWorker.evaluate(async (rules) => {
-      await chrome.storage.local.set({
-        REXConfiguration: { browsing: { capture_rules: rules, url_detail: 'full' } }
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-      await p.hopStore.record({ visitId: '5', referringVisitId: '4', visitTime: Date.now(), url: 'https://www.google.com/goto?u' }, 'https://www.google.com/goto?url=CAES', rules[0])
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(self as any).__capturedEvents = []
-      await p.drain()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
-    }, GOOGLE_RULES)
-
-    expect(events[0].url).toBe('https://www.google.com/goto?url=CAES')
   })
 
   test('describes its own configuration surface', async () => {
@@ -726,9 +402,6 @@ test.describe('rex-browsing — real extension', () => {
 
     // Keyed by the config section it reads, matching rex-page-manipulation.
     expect(Object.keys(details)).toEqual(['browsing'])
-    expect(Object.keys(details.browsing.capture_rules[0]).sort()).toEqual(
-      ['host_suffix', 'id', 'path_prefix']
-    )
   })
 
   test('describes every setting it actually reads', async () => {
@@ -749,76 +422,26 @@ test.describe('rex-browsing — real extension', () => {
     expect(inUse.filter((key: string) => !described.includes(key))).toEqual([])
   })
 
-  test("url_detail 'path' keeps what the intermediate was, not where it pointed", async () => {
-    const result = await serviceWorker.evaluate(async (rules) => {
-      await chrome.storage.local.set({
-        REXConfiguration: { browsing: { capture_rules: rules, url_detail: 'path' } }
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-
-      const real = chrome.history.getVisits
-      chrome.history.getVisits = async () => ([
-        { id: '1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true }
-      ]) as never
-      try {
-        await p.captureVisit({ id: '1', url: 'https://www.google.com/goto?url=CAESqgEB6zswFTni' })
-      } finally {
-        chrome.history.getVisits = real
-      }
-
-      const stored = await p.hopStore.readAll()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(self as any).__capturedEvents = []
-      await p.drain()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const events = (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
-      return { stored: stored[0].url, emitted: events[0].url }
-    }, GOOGLE_RULES)
-
-    // Says it was a /goto rather than an /aclk; carries none of the encoded
-    // destination the redirector puts in its query.
-    expect(result.emitted).toBe('https://www.google.com/goto')
-    // And the query is never held, not merely not emitted.
-    expect(result.stored).toBe('https://www.google.com/goto')
-  })
-
-  test('debug forces full addresses in any build, and says so', async () => {
-    const result = await serviceWorker.evaluate(async () => {
-      await chrome.storage.local.set({
-        REXConfiguration: { browsing: { url_detail: 'none', debug: true } }
-      })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      await p.refreshConfiguration()
-      return { detail: p.urlDetail(), configured: p.currentConfig().url_detail }
-    })
-
-    expect(result.configured).toBe('none')
-    expect(result.detail).toBe('full')
-  })
-
   test('updateConfiguration applies settings without a server round trip', async () => {
     // Synchronous and directly callable, which is the point: a host or a test can
     // configure the module without a served config to fetch.
-    const result = await serviceWorker.evaluate((rules) => {
+    const result = await serviceWorker.evaluate(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      const returned = p.updateConfiguration({ capture_rules: rules, url_detail: 'path' })
+      const returned = p.updateConfiguration({ internal_pages: true })
+      const wanted = p.internalPages.isWanted()
+      p.updateConfiguration({})
 
       return {
         isPromise: returned instanceof Promise,
-        detail: p.currentConfig().url_detail,
-        narrowed: p.captureRules.isNarrowed(),
-        matches: p.captureRules.decide('https://www.google.com/goto?u=1')?.id ?? null,
+        wanted,
+        wantedByDefault: p.internalPages.isWanted(),
       }
-    }, GOOGLE_RULES)
+    })
 
     expect(result.isPromise).toBe(false)
-    expect(result.detail).toBe('path')
-    expect(result.narrowed).toBe(true)
-    expect(result.matches).toBe('google-goto')
+    expect(result.wanted).toBe(true)
+    expect(result.wantedByDefault).toBe(false)
   })
 
   test('the module owns no alarm; the host drives draining', async () => {
@@ -859,10 +482,10 @@ test.describe('rex-browsing — real extension', () => {
   })
 
   test('setup() called twice does not stack listeners', async () => {
-    const calls = await serviceWorker.evaluate(async (rules) => {
+    const calls = await serviceWorker.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
-      await chrome.storage.local.set({ REXConfiguration: { browsing: { capture_rules: rules } } })
+      await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
       await p.setup()
       await p.setup()
 
@@ -873,12 +496,12 @@ test.describe('rex-browsing — real extension', () => {
         return [{ id: '1', visitId: '5', referringVisitId: '4', visitTime: Date.now(), transition: 'link', isLocal: true }] as never
       }
       try {
-        await p.captureVisit({ id: '1', url: 'https://www.google.com/goto?u=1' })
+        await p.captureVisit({ id: '1', url: 'https://www.example.com/a' })
       } finally {
         chrome.history.getVisits = real
       }
       return seen
-    }, GOOGLE_RULES)
+    })
 
     expect(calls).toBe(1)
   })
@@ -903,7 +526,7 @@ test.describe('rex-browsing — real extension', () => {
         chrome.history.getVisits = real
       }
 
-      return (await p.hopStore.readAll()).length
+      return (await p.visitStore.readAll()).length
     })
 
     expect(stored).toBe(0)
@@ -958,178 +581,17 @@ test.describe('rex-browsing — real extension', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Capture lists
+  // Recorded visits
   //
-  // Whether a visit is captured at all, as distinct from the redaction lists
-  // above, which decide what a captured address looks like. Seeded as real
-  // rex-lists entries in real IndexedDB, so these exercise the same matching
-  // path a study's server-synced lists would.
+  // Driven through real navigations rather than a synthesised HistoryItem: what
+  // is under test is what Chrome reports for a visit and a redirect chain, and
+  // a hand-made item would let the test pass while the real record changed.
   // -------------------------------------------------------------------------
 
-  const BLOCKED = 'https://dashboard.example.com/participant'
-  const ORDINARY = 'https://www.google.com/goto?url=CAESUgHrOzAV'
-
-  /**
-   * Captures one visit and reports both the outcome and whether the visit
-   * lookup was reached, since the gate is only worth having if it runs before
-   * the expensive call.
-   */
-  async function tryCapture(url: string, config: Record<string, unknown>) {
-    return serviceWorker.evaluate(async ({ url, config }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-
-      // Seed with the listener off, so recording the visit does not capture it
-      // through onVisited before the spec calls captureVisit itself. The visit
-      // has to exist for the lookup to resolve ids at all.
-      p.updateConfiguration({ enabled: false })
-      await chrome.history.addUrl({ url })
-
-      // Scope is pinned to 'all' because these cover the lists, not the scope.
-      // Under the default scope the seeded visit is one history can see, so
-      // every case here would skip for that reason and prove nothing about lists.
-      p.updateConfiguration({ ...config, capture_scope: 'all' })
-
-      let lookups = 0
-      const realGetVisits = chrome.history.getVisits
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(chrome.history as any).getVisits = (details: { url: string }) => {
-        lookups++
-        return realGetVisits.call(chrome.history, details)
-      }
-
-      try {
-        const captured = await p.captureVisit({ url, title: '', lastVisitTime: Date.now(), visitCount: 1, typedCount: 0, id: '1' })
-        return { captured, lookups }
-      } finally {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(chrome.history as any).getVisits = realGetVisits
-      }
-    }, { url, config })
-  }
-
-  async function seedList(listName: string, pattern: string) {
-    await serviceWorker.evaluate(async ({ listName, pattern }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const lists = (self as any).__listUtils
-      await lists.deleteAllEntriesInList(listName, 'generated')
-      await lists.bulkCreateListEntries([
-        { list_name: listName, pattern, pattern_type: 'domain', source: 'generated', metadata: {} }
-      ])
-    }, { listName, pattern })
-  }
-
-  test('a visit on a block list is not captured, and costs no visit lookup', async () => {
-    await seedList('vg-block', 'example.com')
-
-    const result = await tryCapture(BLOCKED, { capture_block_lists: ['vg-block'] })
-
-    expect(result.captured).toBe(false)
-    // The gate has to sit ahead of getVisits, which is the 1.3-1.5s call this
-    // whole change exists to avoid paying on an excluded host.
-    expect(result.lookups).toBe(0)
-  })
-
-  test('a visit not on the block list is still captured', async () => {
-    await seedList('vg-block', 'example.com')
-
-    const result = await tryCapture(ORDINARY, { capture_block_lists: ['vg-block'] })
-
-    expect(result.captured).toBe(true)
-  })
-
-  test('with an allow list configured, a non-matching visit is not captured', async () => {
-    await seedList('vg-allow', 'google.com')
-
-    const result = await tryCapture(BLOCKED, { capture_allow_lists: ['vg-allow'] })
-
-    expect(result.captured).toBe(false)
-    expect(result.lookups).toBe(0)
-  })
-
-  test('with an allow list configured, a matching visit is captured', async () => {
-    await seedList('vg-allow', 'google.com')
-
-    const result = await tryCapture(ORDINARY, { capture_allow_lists: ['vg-allow'] })
-
-    expect(result.captured).toBe(true)
-  })
-
-  test('a block list wins over an allow list naming the same host', async () => {
-    await seedList('vg-allow', 'google.com')
-    await seedList('vg-block', 'google.com')
-
-    const result = await tryCapture(ORDINARY, {
-      capture_allow_lists: ['vg-allow'],
-      capture_block_lists: ['vg-block']
-    })
-
-    expect(result.captured).toBe(false)
-  })
-
-  // The direct path drops a blocked visit from the held set only after two
-  // awaits. A visit that arrives inside that window takes the held set first, and
-  // its second look must refuse the blocked one the same way the direct path
-  // does. This is the shape of a block-listed dashboard that redirects itself:
-  // the redirect commits while the redirector's handler is still waiting.
-  test('a block-listed visit held for a second look is not captured by the next visit, and costs no lookup', async () => {
-    await seedList('vg-block', 'example.com')
-
-    const result = await serviceWorker.evaluate(async ({ blocked, next }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (self as any).rexBrowsingPlugin
-      p.updateConfiguration({ enabled: false })
-      await chrome.history.addUrl({ url: next })
-      p.updateConfiguration({ capture_scope: 'hops', capture_block_lists: ['vg-block'] })
-
-      const lookups: string[] = []
-      const realGetVisits = chrome.history.getVisits
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(chrome.history as any).getVisits = (details: { url: string }) => {
-        lookups.push(details.url)
-        return realGetVisits.call(chrome.history, details)
-      }
-
-      try {
-        const at = Date.now()
-        // Not awaited in between: Chrome runs onVisited handlers' synchronous
-        // parts in order, so the second call finds the first still held.
-        const first = p.captureVisit({ url: blocked, title: '', lastVisitTime: at, visitCount: 1, typedCount: 0, id: '1' })
-        const second = p.captureVisit({ url: next, title: '', lastVisitTime: at + 1, visitCount: 1, typedCount: 0, id: '2' })
-        await Promise.all([first, second])
-        await p.reconsiderDeferred()
-        const records = await p.hopStore.readAll()
-        return { urls: records.map((r: { url: string | null }) => r.url), lookups }
-      } finally {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(chrome.history as any).getVisits = realGetVisits
-        p.updateConfiguration({ capture_block_lists: [] })
-      }
-    }, { blocked: 'https://dashboard.example.com/participant/', next: 'https://dashboard.example.com/participant/dashboard/' })
-
-    expect(result.lookups).not.toContain('https://dashboard.example.com/participant/')
-    expect(result.urls).not.toContain('https://dashboard.example.com/participant/')
-  })
-
-  test('no capture lists leaves capture exactly as it was', async () => {
-    const result = await tryCapture(BLOCKED, {})
-
-    // Premise for every negative case above: this URL is capturable by default,
-    // so the false results are the lists acting and not some other refusal.
-    expect(result.captured).toBe(true)
-  })
-
-  // -------------------------------------------------------------------------
-  // Capture scope
-  //
-  // Driven through a real redirect rather than a synthesised HistoryItem: what
-  // is under test is Chrome's own treatment of a redirect chain, and a hand-made
-  // item would let the test pass while the real distinction failed.
-  // -------------------------------------------------------------------------
-
-  test.describe('capture scope', () => {
+  test.describe('recorded visits', () => {
     const PORT = 8793
-    const ORIGIN = `http://127.0.0.1:${PORT}`
+    const ORIGIN = `http://dashboard.example.com:${PORT}`
+    const PAGE_TITLE = 'Plain test page'
     let server: import('http').Server
 
     test.beforeAll(async () => {
@@ -1137,43 +599,25 @@ test.describe('rex-browsing — real extension', () => {
       server = http.createServer((req, res) => {
         const url = new URL(req.url ?? '/', ORIGIN)
 
-        if (url.pathname === '/start') {
-          res.writeHead(200, { 'content-type': 'text/html' })
-          res.end('<!doctype html><meta charset="utf-8">'
-            + '<a id="go" href="/hop">go</a>'
-            + '<a id="client" href="/client-hop">client</a>'
-            + '<a id="meta" href="/meta-hop">meta</a>')
-          return
-        }
-
-        if (url.pathname === '/hop') {
-          res.writeHead(302, { location: '/landing' })
+        if (url.pathname === '/redirect') {
+          res.writeHead(302, { location: `/plain${url.search}` })
           res.end()
           return
         }
 
-        // A redirector that is a real document and replaces itself once its
-        // script runs. History search returns it until it does, which is why it
-        // needs a second look rather than the one the 302 above needs.
-        if (url.pathname === '/client-hop') {
-          res.writeHead(200, { 'content-type': 'text/html' })
-          res.end('<!doctype html><meta charset="utf-8">'
-            + '<script>location.replace("/client-landing")</script>')
-          return
-        }
-
-        // The same shape, driven by the parser rather than by script.
-        if (url.pathname === '/meta-hop') {
-          res.writeHead(200, { 'content-type': 'text/html' })
-          res.end('<!doctype html><meta charset="utf-8">'
-            + '<meta http-equiv="refresh" content="0;url=/meta-landing">')
-          return
-        }
-
         res.writeHead(200, { 'content-type': 'text/html' })
-        res.end(`<!doctype html><meta charset="utf-8"><h1>${url.pathname}</h1>`)
+        res.end(`<!doctype html><meta charset="utf-8"><title>${PAGE_TITLE}</title><h1>${url.pathname}</h1>`)
       })
       await new Promise<void>((resolve) => server.listen(PORT, '127.0.0.1', resolve))
+
+      await serviceWorker.evaluate(async () => {
+        await chrome.storage.local.set({
+          REXConfiguration: { browsing: { enabled: true } },
+          rexIdentifier: 'browsing-test-participant'
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (self as any).rexBrowsingPlugin.refreshConfiguration()
+      })
     })
 
     test.afterAll(async () => {
@@ -1183,81 +627,98 @@ test.describe('rex-browsing — real extension', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     })
 
-    /** Click through start -> hop -> landing, then report what was kept. */
-    async function walkRedirect(scope: 'hops' | 'all', linkId: string = 'go') {
-      await serviceWorker.evaluate(async (scope) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const p = (self as any).rexBrowsingPlugin
-        p.updateConfiguration({ capture_scope: scope, url_detail: 'full' })
-        const stored = await chrome.storage.local.get()
-        const keys = Object.keys(stored).filter((k) => k.startsWith('rexBrowsingVisit:'))
-        if (keys.length > 0) await chrome.storage.local.remove(keys)
-      }, scope)
-
+    /** Visit a URL in a real tab and wait for Chrome to record it and its title. */
+    async function visit(url: string) {
       const tab = await context.newPage()
-      await tab.goto(`${ORIGIN}/start`)
-      await tab.click(`#${linkId}`)
+      await tab.goto(url)
       await tab.waitForLoadState('load')
       await tab.waitForTimeout(700)
       await tab.close()
+    }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async function drainVisits(): Promise<any[]> {
       return serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const p = (self as any).rexBrowsingPlugin
-        const records = await p.hopStore.readAll()
-        return records.map((r: { url: string | null }) => r.url)
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return g.__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
       })
     }
 
-    test("scope 'hops' keeps the redirect and drops the pages history can see", async () => {
-      const urls = await walkRedirect('hops')
+    function marker(): string {
+      return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    }
 
-      // The hop is the whole point: no collector can see it any other way.
-      expect(urls).toContain(`${ORIGIN}/hop`)
-      // These two are returned by history.search(), so rex-history reports them
-      // already, with the same visit ids this module would have emitted.
-      expect(urls).not.toContain(`${ORIGIN}/start`)
-      expect(urls).not.toContain(`${ORIGIN}/landing`)
+    test('records an ordinary visit as rex-browsing-visit with the history-visit fields', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visit(visitedUrl)
+
+      const events = await drainVisits()
+      const matching = events.filter((e) => e.url === visitedUrl)
+      expect(matching).toHaveLength(1)
+
+      const recorded = matching[0]
+      expect(recorded.name).toBe('rex-browsing-visit')
+      expect(recorded.url).toBe(visitedUrl)
+      expect(recorded.recorded_url).toBe(visitedUrl)
+      expect(recorded.domain).toBe('example.com')
+      expect(recorded.title).toBe(PAGE_TITLE)
+      expect(typeof recorded.visit_id).toBe('string')
+      expect(typeof recorded.referring_visit_id).toBe('string')
+      expect(recorded.transition_type).toBeDefined()
+      expect(typeof recorded.is_local).toBe('boolean')
+      expect(typeof recorded.visit_time).toBe('number')
+      expect(recorded.date).toBe(recorded.visit_time)
+      expect(typeof recorded.history_item_id).toBe('string')
+      expect(typeof recorded.last_visit_time).toBe('number')
+      expect(recorded.visit_count).toBeGreaterThanOrEqual(1)
+      expect(typeof recorded.typed_count).toBe('number')
+      expect(recorded).not.toHaveProperty('categories')
+      expect(recorded).not.toHaveProperty('capture_rule')
     })
 
-    test("scope 'all' still captures everything, so a study can revert", async () => {
-      const urls = await walkRedirect('all')
+    test('records a redirect step and its landing page as two visits', async () => {
+      const id = marker()
+      const stepUrl = `${ORIGIN}/redirect?marker=${id}`
+      const landingUrl = `${ORIGIN}/plain?marker=${id}`
+      await visit(stepUrl)
 
-      // Premise for the test above: without the scope these ARE captured, so the
-      // absences there are the scope acting rather than a navigation that never
-      // happened.
-      expect(urls).toContain(`${ORIGIN}/hop`)
-      expect(urls).toContain(`${ORIGIN}/landing`)
+      const events = await drainVisits()
+      const step = events.find((e) => e.url === stepUrl)
+      const landing = events.find((e) => e.url === landingUrl)
+
+      expect(step).toBeDefined()
+      expect(landing).toBeDefined()
+      expect(landing.referring_visit_id).toBe(step.visit_id)
     })
 
-    // A client-side redirector is a document, so unlike a 302 it is an ordinary
-    // visit at the moment onVisited fires and history search returns it. Chrome
-    // reclassifies it once the replacement happens, after which no collector
-    // enumerating with search() can see it. Deciding on the first answer drops
-    // the hop from every export.
-    test("scope 'hops' keeps a redirect done with location.replace", async () => {
-      const urls = await walkRedirect('hops', 'client')
+    test('records a visit no list or rule would have captured', async () => {
+      const visitedUrl = `${ORIGIN}/participant/dashboard/settings?marker=${marker()}`
+      await visit(visitedUrl)
 
-      expect(urls).toContain(`${ORIGIN}/client-hop`)
-      expect(urls).not.toContain(`${ORIGIN}/client-landing`)
+      const events = await drainVisits()
+
+      expect(events.map((e) => e.url)).toContain(visitedUrl)
     })
 
-    test("scope 'hops' keeps a redirect done with a meta refresh", async () => {
-      const urls = await walkRedirect('hops', 'meta')
+    test('emits a visit whose URL was deleted before drain', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visit(visitedUrl)
 
-      expect(urls).toContain(`${ORIGIN}/meta-hop`)
-      expect(urls).not.toContain(`${ORIGIN}/meta-landing`)
-    })
+      await serviceWorker.evaluate(async (url) => {
+        await chrome.history.deleteUrl({ url })
+      }, visitedUrl)
 
-    test("scope 'all' captures the client redirects too", async () => {
-      // Premise for the two above, the same way the 302 has one: these are
-      // captured when the scope is not applied, so a miss under 'hops' is the
-      // scope deciding rather than a navigation that never happened.
-      const viaScript = await walkRedirect('all', 'client')
-      expect(viaScript).toContain(`${ORIGIN}/client-hop`)
+      const events = await drainVisits()
+      const recorded = events.find((e) => e.url === visitedUrl)
 
-      const viaMeta = await walkRedirect('all', 'meta')
-      expect(viaMeta).toContain(`${ORIGIN}/meta-hop`)
+      expect(recorded).toBeDefined()
+      expect(recorded.visit_id).toBeDefined()
+      expect(recorded.title).toBe('')
+      expect(recorded).not.toHaveProperty('visit_count')
     })
   })
 
@@ -1309,14 +770,6 @@ test.describe('rex-browsing — real extension', () => {
           return
         }
 
-        // Opens a tab on a different host from its own, so a block list can name
-        // the opener without also naming what it opens. Same server either way.
-        if (url.pathname === '/start-cross') {
-          res.writeHead(200, { 'content-type': 'text/html' })
-          res.end('<!doctype html><meta charset="utf-8">'
-            + `<a id="blank" href="http://127.0.0.1:${PORT}/landing-cross" target="_blank">blank</a>`)
-          return
-        }
 
         res.writeHead(200, { 'content-type': 'text/html' })
         res.end(`<!doctype html><meta charset="utf-8"><h1>${url.pathname}</h1>`)
@@ -1355,7 +808,7 @@ test.describe('rex-browsing — real extension', () => {
     async function openFromStart(selector: string, landing: string, config: Record<string, unknown> = {}) {
       await serviceWorker.evaluate((config) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ url_detail: 'full', ...config })
+        ;(self as any).rexBrowsingPlugin.updateConfiguration(config)
       }, config)
 
       const tab = await context.newPage()
@@ -1373,7 +826,7 @@ test.describe('rex-browsing — real extension', () => {
         const p = (self as any).rexBrowsingPlugin
         return {
           openers: await p.openerStore.readAll(),
-          hops: await p.hopStore.readAll(),
+          visits: await p.visitStore.readAll(),
         }
       })
 
@@ -1397,87 +850,6 @@ test.describe('rex-browsing — real extension', () => {
     })
 
     /**
-     * Opens a tab from a page on a DIFFERENT host, so a block list can name the
-     * opener without also naming what it opens.
-     *
-     * Entering through the shared `/start` fixture would not do: opener and
-     * landing are both 127.0.0.1 there, so one block list covers both, and
-     * `tabNavigated()` already refuses a block-listed landing. The edge would be
-     * absent either way and the test would pass with the opener-side check still
-     * missing. Reports the URLs `getVisits()` was called with, because the
-     * complaint in AI-Extension#124 is the cost of that call, not only the edge.
-     */
-    async function openFromBlockedOpener() {
-      await serviceWorker.evaluate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const g = self as any
-        g.rexBrowsingPlugin.updateConfiguration({
-          url_detail: 'full',
-          capture_block_lists: ['vg-opener-block']
-        })
-
-        g.__lookedUp = []
-        g.__realGetVisits = chrome.history.getVisits
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(chrome.history as any).getVisits = (details: { url: string }) => {
-          g.__lookedUp.push(details.url)
-          return g.__realGetVisits.call(chrome.history, details)
-        }
-      })
-
-      const opener = `http://dashboard.example.com:${PORT}/start-cross`
-      const tab = await context.newPage()
-      await tab.goto(opener)
-
-      const opened = context.waitForEvent('page', { timeout: 5000 }).catch(() => null)
-      await tab.click('#blank')
-      const newTab = await opened
-      await (newTab ?? tab).waitForLoadState('load').catch(() => {})
-      await tab.waitForTimeout(1200)
-
-      const result = await serviceWorker.evaluate(async () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const g = self as any
-        ;(chrome.history as any).getVisits = g.__realGetVisits
-        return {
-          openers: await g.rexBrowsingPlugin.openerStore.readAll(),
-          lookedUp: g.__lookedUp as string[]
-        }
-      })
-
-      await newTab?.close().catch(() => {})
-      await tab.close()
-
-      return { opener, ...result }
-    }
-
-    test('an opener on a block list costs no visit lookup, and records no edge', async () => {
-      await seedList('vg-opener-block', 'example.com')
-
-      const result = await openFromBlockedOpener()
-
-      // The cost is the whole complaint: getVisits returns every visit Chrome
-      // holds for the URL, which is seconds on a heavily reloaded page. The gate
-      // has to sit ahead of it, not merely discard the answer afterwards.
-      expect(result.lookedUp).not.toContain(result.opener)
-      // And the opener's visit id must not reach an emitted point, since a
-      // block-listed site is one the study said not to collect from.
-      expect(result.openers).toHaveLength(0)
-    })
-
-    test('an opener that is not block-listed is still attributed across hosts', async () => {
-      // Premise for the test above: the cross-host walk DOES produce an edge
-      // when nothing blocks it, so the absences there are the block list acting
-      // rather than a fixture that never opened a tab.
-      await seedList('vg-opener-block', 'example.invalid')
-
-      const result = await openFromBlockedOpener()
-
-      expect(result.lookedUp).toContain(result.opener)
-      expect(result.openers).toHaveLength(1)
-    })
-
-    /**
      * Opens a tab from an opener visited enough times to test a ceiling against.
      *
      * Two visits and a ceiling of one, rather than a seeded 440,000-visit
@@ -1492,12 +864,22 @@ test.describe('rex-browsing — real extension', () => {
       await serviceWorker.evaluate(async ({ opener, maxOpenerVisits }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
-        g.rexBrowsingPlugin.updateConfiguration({ url_detail: 'full', max_opener_visits: maxOpenerVisits })
+        g.rexBrowsingPlugin.updateConfiguration({ max_opener_visits: maxOpenerVisits })
 
         // A second visit, so the count exceeds a ceiling of one. The navigation
         // below supplies the first.
         await chrome.history.addUrl({ url: opener })
+      }, { opener, maxOpenerVisits })
 
+      const tab = await context.newPage()
+      await tab.goto(opener)
+      // Let the opener's own visit be recorded first: that looks it up too, and
+      // only the lookup made when it opens a tab is under test here.
+      await tab.waitForTimeout(500)
+
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
         g.__lookedUp = []
         g.__realGetVisits = chrome.history.getVisits
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1505,10 +887,7 @@ test.describe('rex-browsing — real extension', () => {
           g.__lookedUp.push(details.url)
           return g.__realGetVisits.call(chrome.history, details)
         }
-      }, { opener, maxOpenerVisits })
-
-      const tab = await context.newPage()
-      await tab.goto(opener)
+      })
 
       const opened = context.waitForEvent('page', { timeout: 5000 }).catch(() => null)
       await tab.click('#blank')
@@ -1586,8 +965,8 @@ test.describe('rex-browsing — real extension', () => {
       // nothing, because the hop was the first page in the new tab.
       expect(result.landingVisit?.referringVisitId).toBe(hopVisit?.visitId)
       expect(hopVisit?.referringVisitId).toBe('0')
-      // The hop is captured as usual under the default scope.
-      expect(result.hops.map((h: { visit_id: string }) => h.visit_id)).toContain(hopVisit?.visitId)
+      // The hop is recorded as an ordinary visit.
+      expect(result.visits.map((h: { visit_id: string }) => h.visit_id)).toContain(hopVisit?.visitId)
 
       const events = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1607,13 +986,13 @@ test.describe('rex-browsing — real extension', () => {
       expect(openerPoints[0].visit_id).toBe(hopVisit?.visitId)
       expect(openerPoints[0].referring_visit_id).toBe(result.startVisit?.visitId)
       expect(openerPoints[0].url).toBe(`${ORIGIN}/hop`)
-      // And the hop itself still goes out as a hop.
+      // And the hop itself still goes out as a visit.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect(events.filter((e: any) => e.name === 'rex-browsing-visit').map((e: any) => e.visit_id)).toContain(hopVisit?.visitId)
     })
 
-    test('the drained edge carries ids and the configured address detail', async () => {
-      const result = await openFromStart('#blank', '/landing-blank', { url_detail: 'none' })
+    test('the drained edge carries ids and the landing address', async () => {
+      const result = await openFromStart('#blank', '/landing-blank')
 
       const events = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1628,24 +1007,14 @@ test.describe('rex-browsing — real extension', () => {
       expect(events).toHaveLength(1)
       expect(events[0].visit_id).toBe(result.landingVisit?.visitId)
       expect(events[0].referring_visit_id).toBe(result.startVisit?.visitId)
-      expect(events[0].url).toBeUndefined()
-      // The address is not held either, not merely not emitted.
-      expect(result.openers[0].url).toBeNull()
+      expect(events[0].url).toBe(`${ORIGIN}/landing-blank`)
+      expect(events[0]).not.toHaveProperty('capture_rule')
 
       const remaining = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return (await (self as any).rexBrowsingPlugin.openerStore.readAll()).length
       })
       expect(remaining).toBe(0)
-    })
-
-    test('capture rules narrow opener edges the way they narrow hops', async () => {
-      const result = await openFromStart('#blank', '/landing-blank', {
-        capture_rules: [{ id: 'elsewhere', host_suffix: 'example.com', path_prefix: '/' }]
-      })
-
-      expect(result.landingVisit?.referringVisitId).toBe('0')
-      expect(result.openers).toHaveLength(0)
     })
 
     test('tab_opener_edges: false records nothing and holds no tabs listener', async () => {
@@ -1678,7 +1047,7 @@ test.describe('rex-browsing — real extension', () => {
         const p = (self as any).rexBrowsingPlugin
         await p.openerStore.put({
           visit_id: '9', referring_visit_id: '0', opener_visit_id: '3', visit_time: Date.now(),
-          url: null, capture_rule: 'all', transition: 'link'
+          url: 'https://www.example.com/a', transition: 'link'
         })
         await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
         await p.refreshConfiguration()
@@ -1703,8 +1072,6 @@ test.describe('rex-browsing — real extension', () => {
   // -------------------------------------------------------------------------
 
   test.describe('internal pages', () => {
-    const WITH_CHROME = ['http', 'https', 'chrome']
-
     test.beforeEach(async () => {
       await serviceWorker.evaluate(async () => {
         const keys = (await chrome.storage.local.getKeys()).filter((key) => key.startsWith('rexBrowsingPage:'))
@@ -1750,8 +1117,8 @@ test.describe('rex-browsing — real extension', () => {
       })
     }
 
-    test('a chrome:// page is recorded when the study names the chrome scheme', async () => {
-      const stored = await visitInternalPage('chrome://version/', { schemes: WITH_CHROME, url_detail: 'full' })
+    test('a chrome:// page is recorded when the study turns on internal_pages', async () => {
+      const stored = await visitInternalPage('chrome://version/', { internal_pages: true })
 
       // Premise: Chrome itself recorded nothing, so this record is the only one.
       const inHistory = await serviceWorker.evaluate(async () =>
@@ -1779,35 +1146,16 @@ test.describe('rex-browsing — real extension', () => {
     })
 
     test('a chrome:// page is not recorded by default', async () => {
-      const stored = await visitInternalPage('chrome://version/', { url_detail: 'full' })
+      const stored = await visitInternalPage('chrome://version/', {})
 
       expect(stored).toHaveLength(0)
-    })
-
-    test("url_detail 'path' keeps which page it was and drops the query", async () => {
-      // chrome://history/?q= holds text the participant typed.
-      const stored = await visitInternalPage('chrome://history/?q=private-words', { schemes: WITH_CHROME, url_detail: 'path' })
-
-      expect(stored.map((record: { url: string }) => record.url)).toContain('chrome://history/')
-      expect(JSON.stringify(stored)).not.toContain('private-words')
-    })
-
-    test("url_detail 'none' holds and emits no address", async () => {
-      const stored = await visitInternalPage('chrome://version/', { schemes: WITH_CHROME, url_detail: 'none' })
-
-      expect(stored).toHaveLength(1)
-      expect(stored[0].url).toBeNull()
-
-      const points = await drainPages()
-      expect(points).toHaveLength(1)
-      expect(points[0].url).toBeUndefined()
     })
 
     test('a page Chrome does record in history is left to the history path', async () => {
       const recorded = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
-        p.updateConfiguration({ schemes: ['http', 'https', 'chrome', 'file'], url_detail: 'full' })
+        p.updateConfiguration({ internal_pages: true })
         return {
           web: await p.captureInternalPage(1, 'https://example.com/'),
           file: await p.captureInternalPage(1, 'file:///tmp/page.html'),
@@ -1822,9 +1170,9 @@ test.describe('rex-browsing — real extension', () => {
       const recorded = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
-        p.updateConfiguration({ enabled: false, schemes: ['http', 'https', 'chrome'], url_detail: 'full' })
+        p.updateConfiguration({ enabled: false, internal_pages: true })
         const whenDisabled = await p.captureInternalPage(1, 'chrome://version/')
-        p.updateConfiguration({ schemes: ['http', 'https', 'chrome'], url_detail: 'full' })
+        p.updateConfiguration({ internal_pages: true })
         const whenEnabled = await p.captureInternalPage(1, 'chrome://version/')
         return { whenDisabled, whenEnabled }
       })
@@ -1834,20 +1182,20 @@ test.describe('rex-browsing — real extension', () => {
       expect(recorded.whenDisabled).toBe(false)
     })
 
-    test('naming the chrome scheme holds a tabs listener without turning on opener edges', async () => {
+    test('internal_pages holds a tabs listener without turning on opener edges', async () => {
       const result = await serviceWorker.evaluate(() => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
         p.updateConfiguration({ tab_opener_edges: false })
         const withNeither = p.isListeningForTabs()
-        p.updateConfiguration({ tab_opener_edges: false, schemes: ['http', 'https', 'chrome'] })
+        p.updateConfiguration({ tab_opener_edges: false, internal_pages: true })
         const withPages = p.isListeningForTabs()
         // A new tab with an opener would start an opener lookup if this
         // listener still served opener edges.
         p.tabListeners.created({ id: 424242, openerTabId: 1 })
         const reserved = p.tabOpeners.pending.has(424242)
         p.tabOpeners.forgetAll()
-        p.updateConfiguration({ enabled: false, schemes: ['http', 'https', 'chrome'] })
+        p.updateConfiguration({ enabled: false, internal_pages: true })
         const whenDisabled = p.isListeningForTabs()
         return { withNeither, withPages, reserved, whenDisabled }
       })
@@ -1859,7 +1207,7 @@ test.describe('rex-browsing — real extension', () => {
       const remaining = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
-        p.updateConfiguration({ schemes: ['http', 'https', 'chrome'] })
+        p.updateConfiguration({ internal_pages: true })
         await p.captureInternalPage(1, 'chrome://version/')
         const beforeDisable = (await p.pageStore.readAll()).length
         await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })

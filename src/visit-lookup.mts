@@ -7,14 +7,20 @@
  * just fired.
  */
 
-export interface HopVisit {
+export interface BrowsingVisit {
   /** The address the ids were resolved from. */
   url: string;
   visitId: string;
   referringVisitId: string;
   visitTime: number;
   /** Chrome's transition type for the visit, `link` for a click. */
-  transition?: string;
+  transition: string;
+  isLocal: boolean;
+}
+
+/** The schemes recorded as visits, the same set rex-history records. */
+export function isRecordedScheme(url: string): boolean {
+  return url.startsWith('http:') || url.startsWith('https:')
 }
 
 /**
@@ -42,7 +48,7 @@ export async function visitCount(url: string): Promise<number | null> {
 }
 
 /** Holds no state, so a function rather than a class. */
-export async function newestVisit(url: string): Promise<HopVisit | null> {
+export async function newestVisit(url: string): Promise<BrowsingVisit | null> {
   try {
     const visits = await chrome.history.getVisits({ url })
     let newest = visits[0]
@@ -62,7 +68,8 @@ export async function newestVisit(url: string): Promise<HopVisit | null> {
       visitId: newest.visitId,
       referringVisitId: newest.referringVisitId,
       visitTime: newest.visitTime ?? Date.now(),
-      transition: newest.transition
+      transition: newest.transition,
+      isLocal: newest.isLocal
     }
   } catch (error) {
     // This runs inside an onVisited handler, where an unhandled rejection is

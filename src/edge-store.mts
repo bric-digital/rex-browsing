@@ -12,7 +12,6 @@
 
 export interface StoredRecord {
   visit_time: number;
-  capture_rule: string;
 }
 
 export interface StoredEdge extends StoredRecord {
@@ -43,19 +42,15 @@ export class EdgeStore<T extends StoredRecord> {
     return keys.map((key) => stored[key] as T).filter((record) => record !== undefined)
   }
 
-  async forget(ids: string[]): Promise<void> {
-    await chrome.storage.local.remove(ids.map((id) => this.keyFor(id)))
+  async read(id: string): Promise<T | undefined> {
+    const key = this.keyFor(id)
+    const stored = await chrome.storage.local.get(key)
+
+    return stored[key] as T | undefined
   }
 
-  /** Discard records held under one rule id. Returns how many went. */
-  async forgetByRule(ruleId: string): Promise<number> {
-    const matching = (await this.readAll()).filter((record) => record.capture_rule === ruleId)
-
-    if (matching.length > 0) {
-      await this.forget(matching.map(this.idOf))
-    }
-
-    return matching.length
+  async forget(ids: string[]): Promise<void> {
+    await chrome.storage.local.remove(ids.map((id) => this.keyFor(id)))
   }
 
   /** Discard everything held. Used when the module is turned off. */
