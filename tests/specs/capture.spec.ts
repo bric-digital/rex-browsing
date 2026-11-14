@@ -2,9 +2,8 @@
  * Loads the module as a real Chrome extension with real chrome.history,
  * chrome.storage and chrome.alarms.
  *
- * Headless mode is off because Chrome's CDP bridge does not expose extension
- * service workers in headless: a window appears during the run on macOS and
- * Windows; wrap in Xvfb on Linux CI.
+ * Runs in Chrome's new headless mode (`channel: 'chromium'`), which loads
+ * extensions and exposes their service workers, so no window opens.
  */
 
 import { test, expect, chromium, type BrowserContext, type Worker } from '@playwright/test'
@@ -28,16 +27,11 @@ test.describe('rex-browsing — real extension', () => {
     userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-browsing-'))
 
     context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
+      headless: true,
+      channel: 'chromium',
       args: [
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
-        // Headed is not a choice: Chrome's CDP bridge does not expose extension
-        // service workers in headless mode, so the specs cannot reach the module.
-        // Parking the window off-screen keeps it out of the way of whoever is at
-        // the keyboard; it still takes focus briefly on launch.
-        '--window-position=-3000,-3000',
-        '--window-size=800,600',
         // Gives the local server a name with a registered domain, which neither
         // "localhost" nor "127.0.0.1" has. example.com is IANA-reserved, so the
         // name cannot collide with anything real.
@@ -2262,12 +2256,11 @@ test.describe('rex-browsing — real extension', () => {
         const extensionPath = path.join(__dirname, '../extension')
         restartUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-browsing-restart-'))
         restartContext = await chromium.launchPersistentContext(restartUserDataDir, {
-          headless: false,
+          headless: true,
+          channel: 'chromium',
           args: [
             `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            '--window-position=-3000,-3000',
-            '--window-size=800,600'
+            `--load-extension=${extensionPath}`
           ]
         })
 
