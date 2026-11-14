@@ -56,7 +56,7 @@ function mergedLink(links: TabLink[]): TabLink {
 
   return {
     ...foldedOldestFirst(oldestFirst.filter((link) => link.tab_id === tabId)),
-    page_events_url_shown_at: oldestFirst[oldestFirst.length - 1].page_events_url_shown_at
+    page_events_url_shown_at: Math.max(...oldestFirst.map((link) => link.page_events_url_shown_at))
   }
 }
 
