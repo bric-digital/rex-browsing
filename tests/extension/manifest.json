@@ -3,7 +3,7 @@
   "name": "rex-browsing Test Extension",
   "version": "0.0.1",
   "description": "Minimal Chrome extension used by Playwright tests. Loads only the rex-browsing service worker module.",
-  "permissions": ["alarms", "history", "storage", "tabs"],
+  "permissions": ["alarms", "history", "storage", "tabs", "webNavigation"],
   "background": {
     "service_worker": "service-worker.bundle.js",
     "type": "module"

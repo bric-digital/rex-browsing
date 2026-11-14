@@ -14,13 +14,13 @@ Import it once in the host extension's service worker, which registers the modul
 import '@bric/rex-browsing/service-worker'
 ```
 
-The host extension needs the `history` permission, and `storage`, which rex-core already requires. `tabs` is needed only for `tab_opener_edges` and `internal_pages` (see below).
+The host extension needs the `history` permission, and `storage`, which rex-core already requires. `tabs` is needed for `tab_opener_edges` and `internal_pages` (see below). Tab fields need `webNavigation` and `tabs`; without them records carry none.
 
 `package.json` on `main` carries a `-dev` version between releases (`3.0.0-dev` means not yet 3.0.0), so the repo never names a release that was not cut. Releases and what the numbers mean: [RELEASING.md](RELEASING.md).
 
 ## Why
 
-Researchers compare what participants did before installing a REX extension with what they do after. rex-history reads Chrome history, the only source for browsing before install. After install a study can also record each visit as it happens, with the redirect steps history search omits and the link to its tab and page-events session, in the same structure as a `rex-history-visit`, so one analysis spans the install date. rex-browsing is that live record.
+Researchers compare what participants did before installing a REX extension with what they do after. rex-history reads Chrome history, the only source for browsing before install. After install a study can also record each visit as it happens, with the redirect steps history search omits and the link to its tab, in the same structure as a `rex-history-visit`, so one analysis spans the install date. rex-browsing is that live record.
 
 Chrome also keeps redirect steps out of history search results, while the landing page still points at one through its referring visit id. `chrome.history.onVisited` fires for those steps, so recording from it means a landing page's `referring_visit_id` names a record that exists.
 
@@ -49,7 +49,7 @@ The item-level fields come from the history item whose address matches exactly. 
 
 There are no list fields: no `category`, no allow or block list results.
 
-Tab fields, present when the visit is linked to a tab (see below): `tab_id`, `window_id`, `session_id`, `page_events_url_shown_at`. A link can be partial: `page_events_url_shown_at` is always present, and each of the other three is present only when the url-active record carried it.
+Tab fields, present when the visit is linked to a tab (see below): `tab_id` and `window_id`. `window_id` is absent when the tab's window cannot be read, for example because the tab closed first.
 
 `ids_unavailable` is present only on a visit recorded without its ids, with one of two values:
 
@@ -72,7 +72,7 @@ With `internal_pages` on, the browser's own pages (`chrome://`, `chrome-untruste
 
 ## Tab link
 
-A visit is linked to the tab it happened in from a `rex-page-events` url-active record. The host extension must include rex-page-events, which sends the module a `pageUrlActive` message for each record. A record needs a string `url` and a numeric `url_shown_at`; anything else is ignored. `tab_id`, `window_id` and `session_id` are copied when present, and one log line is written when any is missing, so a visit can carry a partial link. The module matches a record to a visit when the address is the same and the record's `url_shown_at` is within `page_events_link_tolerance_ms` of the visit time. When several records match one visit, they are merged into one tab's link: the tab is the `tab_id` of the newest record that has one, only records from that tab (and the visit's existing link, when it is the same tab) supply the tab fields, each taking its newest present value, and `page_events_url_shown_at` is the newest record's, including a record that has no `tab_id`. A tab field of the wrong type (a `tab_id` or `window_id` that is not a number, a `session_id` that is not a string) counts as missing. Either may arrive first. Set the tolerance to `0` to turn linking off. Without rex-page-events, visits are recorded without tab fields.
+A visit is linked to the tab it happened in from the module's own `chrome.webNavigation` events (`onBeforeNavigate`, `onCommitted`, `onHistoryStateUpdated`) in each tab's main frame. A navigation matches a visit when the address is the same and the navigation's time is within `tab_link_tolerance_ms` of the visit time; the newest matching navigation decides the tab, and fields of two tabs never combine. Either may arrive first. A single server redirect's step and landing both get tab fields; the middle steps of a longer chain carry none. Tab fields never rely on `referring_visit_id`. Set the tolerance to `0` to turn linking off, which also removes the `webNavigation` listeners. Without the `webNavigation` permission, visits are recorded without tab fields.
 
 ## Lifecycle
 
@@ -87,7 +87,6 @@ A visit is linked to the tab it happened in from a `rex-page-events` url-active 
 | Message | Direction | Effect |
 |---------|-----------|--------|
 | `triggerBrowsingDrain` | host to module | Emits stored records now. The response is the number of points emitted, or `0` when nothing was emitted (disabled, no identifier, a drain already running, or an error) |
-| `pageUrlActive` | rex-page-events to module | Carries a url-active record for the tab link. The response is `{ "success": true }` once stored, or `{ "success": false }` when storing fails. A malformed record, or any record while the module is disabled, is ignored and gets no response from this module |
 
 ## Configuration
 
@@ -98,7 +97,7 @@ The module declares the same settings in code, via `configurationDetails()` in `
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Turns the module on. Off, it captures and emits nothing and discards what it holds |
-| `page_events_link_tolerance_ms` | number | `5000` | Match window for linking a visit to a url-active record. `0` disables linking |
+| `tab_link_tolerance_ms` | number | `5000` | Match window for linking a visit to a navigation. `0` disables linking |
 | `tab_opener_edges` | boolean | `true` | Record `rex-browsing-opener` points |
 | `max_visits_per_url` | number | `10000` | Ceiling on an address's visit count. Above it the address is not looked up: its visits are recorded without ids (`ids_unavailable: over_ceiling`), each drain emits one `rex-browsing-visit-ceiling-exceeded` event for it, and new tabs it opens or that land on it get no opener record. `getVisits()` cannot be bounded and costs about a second on a page that re-records a visit every few seconds. `0` removes the ceiling |
 | `internal_pages` | boolean | `false` | Record `rex-browsing-page` points |
@@ -124,7 +123,7 @@ Example:
 | `visit-lookup.mts` | Turns a URL into its newest visit via `chrome.history.getVisits()` |
 | `visit-store.mts` | Holds recorded visits until they can be emitted |
 | `history-item.mts` | Reads the history-item fields and computes `domain` |
-| `tab-link.mts` | Links visits to tabs from url-active records |
+| `tab-link.mts` | Links visits to tabs from webNavigation events |
 | `edge-store.mts` | One key per record in `chrome.storage.local`, under a prefix per kind of record |
 | `tab-opener.mts` | Attributes a new tab's first visit to the page that opened it |
 | `internal-pages.mts` | Records the browser's own pages from `chrome.tabs` |
@@ -158,7 +157,7 @@ Behavior changes:
 - It records every http and https visit, not only redirect hops, in the `rex-history-visit` structure. v2 hop points carried only ids and a redacted address.
 - Nothing is recorded before configuration arrives. Visits are held until an identifier exists.
 - Records past `max_record_age_days` are discarded in every state.
-- New: tab link fields and `page_events_link_tolerance_ms`.
+- New: tab link fields and `tab_link_tolerance_ms`.
 - New: `max_visits_per_url` (default `10000`), which bounds the visits recorded with ids per address. Above it, and when the lookup fails, visits are recorded without ids and carry `ids_unavailable`. Analysis that assumes every `rex-browsing-visit` has a `visit_id` must handle the absence.
 - New: the `rex-browsing-visit-ceiling-exceeded` event.
 - Unsent v2 records under `rexVisitGraphHop:` are not read by v3 and are never emitted. Drain v2 before upgrading.

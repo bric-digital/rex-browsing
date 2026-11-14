@@ -1256,6 +1256,155 @@ test.describe('rex-browsing — real extension', () => {
     })
   })
 
+  test.describe('tab fields from navigation', () => {
+    const PORT = 8794
+    const ORIGIN = `http://dashboard.example.com:${PORT}`
+    let server: import('http').Server
+
+    test.beforeAll(async () => {
+      const http = await import('http')
+      server = http.createServer((req, res) => {
+        const url = new URL(req.url ?? '/', ORIGIN)
+
+        if (url.pathname === '/redirect') {
+          res.writeHead(302, { location: `/plain${url.search}` })
+          res.end()
+          return
+        }
+
+        res.writeHead(200, { 'content-type': 'text/html' })
+        if (url.pathname === '/spa') {
+          res.end('<!doctype html><meta charset="utf-8"><title>Spa</title>'
+            + "<script>setTimeout(function () { history.pushState({}, '', '/spa-next' + location.search) }, 300)</script>")
+          return
+        }
+
+        res.end(`<!doctype html><meta charset="utf-8"><title>Plain</title><h1>${url.pathname}</h1>`)
+      })
+      await new Promise<void>((resolve) => server.listen(PORT, '127.0.0.1', resolve))
+    })
+
+    test.afterAll(async () => {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    })
+
+    test.beforeEach(async () => {
+      await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 5000 })
+        await chrome.storage.session.remove('rexBrowsingTabNavigation')
+      })
+    })
+
+    /** Open a real page; resolves its real tab and window ids before closing it. */
+    async function openAndClose(url: string): Promise<{ tabId: number, windowId: number }> {
+      const tab = await context.newPage()
+      await tab.goto(url)
+      await tab.waitForLoadState('load')
+      await tab.waitForTimeout(1000)
+
+      const ids = await serviceWorker.evaluate(async (prefix) => {
+        const tabs = await chrome.tabs.query({})
+        const found = tabs.find((candidate) => (candidate.url ?? '').startsWith(prefix))
+        return { tabId: found?.id ?? -1, windowId: found?.windowId ?? -1 }
+      }, `${ORIGIN}/`)
+
+      await tab.close()
+      return ids
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async function drainVisits(): Promise<any[]> {
+      return serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = self as any
+        g.__capturedEvents = []
+        await g.rexBrowsingPlugin.drain()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return g.__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit')
+      })
+    }
+
+    function marker(): string {
+      return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    }
+
+    test('an ordinary visit carries the tab and window it happened in', async () => {
+      const url = `${ORIGIN}/plain?marker=${marker()}`
+      const ids = await openAndClose(url)
+
+      const visit = (await drainVisits()).find((e) => e.url === url)
+
+      expect(ids.tabId).toBeGreaterThanOrEqual(0)
+      expect(visit.tab_id).toBe(ids.tabId)
+      expect(visit.window_id).toBe(ids.windowId)
+    })
+
+    test('a single server redirect gives the redirect step and the landing the same tab', async () => {
+      const query = `?marker=${marker()}`
+      const ids = await openAndClose(`${ORIGIN}/redirect${query}`)
+
+      const visits = (await drainVisits()).filter((e) => e.url.endsWith(query))
+
+      expect(visits.map((v) => v.url).sort()).toEqual([`${ORIGIN}/plain${query}`, `${ORIGIN}/redirect${query}`])
+      expect(visits.map((v) => v.tab_id)).toEqual([ids.tabId, ids.tabId])
+    })
+
+    test('an in-page address change carries its tab', async () => {
+      const query = `?marker=${marker()}`
+      const ids = await openAndClose(`${ORIGIN}/spa${query}`)
+
+      const visit = (await drainVisits()).find((e) => e.url === `${ORIGIN}/spa-next${query}`)
+
+      expect(visit.tab_id).toBe(ids.tabId)
+    })
+
+    test('a closed tab\'s visit keeps tab_id without window_id', async () => {
+      const url = `${ORIGIN}/plain?marker=${marker()}`
+      const result = await serviceWorker.evaluate(async ({ url }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (self as any).rexBrowsingPlugin
+        const real = chrome.history.getVisits
+        const visitTime = Date.now()
+        chrome.history.getVisits = async () => ([
+          { id: '1', visitId: '9001', referringVisitId: '0', visitTime, transition: 'link', isLocal: true }
+        ]) as never
+        try {
+          await p.captureVisit({ id: '1', url })
+        } finally {
+          chrome.history.getVisits = real
+        }
+        const held = await p.captureNavigation({ tabId: 987654, url, frameId: 0, timeStamp: visitTime })
+        return { held }
+      }, { url })
+
+      const visit = (await drainVisits()).find((e) => e.url === url)
+
+      expect(result.held).toBe(true)
+      expect(visit.tab_id).toBe(987654)
+      expect(visit).not.toHaveProperty('window_id')
+    })
+
+    test('a disabled module and a tolerance of 0 hold no navigation listener', async () => {
+      const listening = await serviceWorker.evaluate((configs) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (self as any).rexBrowsingPlugin
+        return configs.map((config) => {
+          p.updateConfiguration(config)
+          return p.isListeningForNavigation()
+        })
+      }, [
+        { enabled: true, tab_link_tolerance_ms: 5000 },
+        { enabled: false, tab_link_tolerance_ms: 5000 },
+        { enabled: true, tab_link_tolerance_ms: 0 },
+        { enabled: true, tab_link_tolerance_ms: 5000 }
+      ])
+
+      expect(listening).toEqual([true, false, false, true])
+    })
+  })
+
   // -------------------------------------------------------------------------
   // Tab opener edges
   //

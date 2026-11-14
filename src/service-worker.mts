@@ -114,6 +114,8 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     removed: (tabId: number) => void;
   } | null = null
 
+  private navigationListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null
+
   moduleName(): string {
     return 'rex-browsing'
   }
@@ -459,6 +461,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.config = DEFAULT_CONFIG
     this.stopListening()
     this.stopListeningForTabs()
+    this.stopListeningForNavigation()
   }
 
   /**
@@ -494,6 +497,12 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     } else {
       this.stopListeningForTabs()
     }
+
+    if (this.config.enabled && this.config.tab_link_tolerance_ms > 0) {
+      this.startListeningForNavigation()
+    } else {
+      this.stopListeningForNavigation()
+    }
   }
 
   /** True while a history listener is registered. Readable for diagnostics. */
@@ -504,6 +513,38 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   /** True while the tabs listeners are registered. Readable for diagnostics. */
   isListeningForTabs(): boolean {
     return this.tabListeners !== null
+  }
+
+  /** True while the webNavigation listeners are registered. Readable for diagnostics. */
+  isListeningForNavigation(): boolean {
+    return this.navigationListener !== null
+  }
+
+  private startListeningForNavigation(): void {
+    if (this.navigationListener !== null || typeof chrome.webNavigation?.onCommitted?.addListener !== 'function') {
+      return
+    }
+
+    this.navigationListener = (details) => {
+      this.captureNavigation(details).catch((error) => {
+        console.error('[rex-browsing] Navigation capture failed:', error)
+      })
+    }
+
+    chrome.webNavigation.onBeforeNavigate.addListener(this.navigationListener)
+    chrome.webNavigation.onCommitted.addListener(this.navigationListener)
+    chrome.webNavigation.onHistoryStateUpdated.addListener(this.navigationListener)
+  }
+
+  private stopListeningForNavigation(): void {
+    if (this.navigationListener === null) {
+      return
+    }
+
+    chrome.webNavigation.onBeforeNavigate.removeListener(this.navigationListener)
+    chrome.webNavigation.onCommitted.removeListener(this.navigationListener)
+    chrome.webNavigation.onHistoryStateUpdated.removeListener(this.navigationListener)
+    this.navigationListener = null
   }
 
   private startListeningForTabs(): void {

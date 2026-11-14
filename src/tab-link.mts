@@ -34,27 +34,25 @@ function newest(navigations: TabNavigation[]): TabNavigation {
 
 export class TabLinker {
   /**
-   * Held navigations are one storage value, so writes are queued: two events
-   * read-modify-writing it at once would each drop the other's navigation.
+   * Held navigations are one storage value, and a visit's link is read then
+   * written, so writes are queued: two events read-modify-writing at once would
+   * each drop the other's change.
    */
   private writes: Promise<void> = Promise.resolve()
 
   constructor(private readonly store: VisitStore, private readonly tolerance: () => number) {}
 
   async acceptNavigation(navigation: TabNavigation): Promise<void> {
-    const stored = this.writes.then(async () => {
+    await this.enqueue(async () => {
       const held = await this.readHeld()
 
       held.push(navigation)
       await chrome.storage.session.set({ [STORAGE_KEY]: held.slice(-MAX_HELD) })
     })
 
-    this.writes = stored.catch(() => undefined)
-    await stored
-
     for (const visit of await this.store.readAll()) {
       if (this.matches(visit, navigation)) {
-        await this.store.attachLink(storageIdOf(visit), linkFrom(navigation))
+        await this.enqueue(() => this.store.attachLink(storageIdOf(visit), linkFrom(navigation)))
       }
     }
   }
@@ -63,13 +61,20 @@ export class TabLinker {
     const matching = (await this.readHeld()).filter((navigation) => this.matches(visit, navigation))
 
     if (matching.length > 0) {
-      await this.store.attachLink(storageIdOf(visit), linkFrom(newest(matching)))
+      await this.enqueue(() => this.store.attachLink(storageIdOf(visit), linkFrom(newest(matching))))
     }
   }
 
   /** Discard every held navigation. Used when the module is turned off. */
   async clear(): Promise<void> {
     await chrome.storage.session.remove(STORAGE_KEY)
+  }
+
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const queued = this.writes.then(work)
+
+    this.writes = queued.catch(() => undefined)
+    return queued
   }
 
   private matches(visit: VisitRecord, navigation: TabNavigation): boolean {
