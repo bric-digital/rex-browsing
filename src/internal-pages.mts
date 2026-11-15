@@ -42,12 +42,12 @@ export class InternalPageRecorder {
       return false
     }
 
-    const seenAt = Date.now()
+    const seenAtMs = Date.now()
 
     await this.deps.store.put({
-      page_id: `${tabId}:${seenAt}`,
+      page_id: `${tabId}:${seenAtMs}`,
       tab_id: tabId,
-      visit_time: seenAt,
+      visit_time: seenAtMs,
       url
     })
 

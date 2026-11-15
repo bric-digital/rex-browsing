@@ -49,10 +49,10 @@ export async function visitCount(url: string): Promise<number | null> {
 }
 
 /**
- * The visit at `visitTime` when one matches, otherwise the newest. Holds no
+ * The visit at `visitTimeMs` when one matches, otherwise the newest. Holds no
  * state, so a function rather than a class.
  */
-export async function visitAtOrNewest(url: string, visitTime?: number): Promise<ResolvedVisit | null> {
+export async function visitAtOrNewest(url: string, visitTimeMs?: number): Promise<ResolvedVisit | null> {
   try {
     const visits = await chrome.history.getVisits({ url })
     let newest = visits[0]
@@ -67,7 +67,7 @@ export async function visitAtOrNewest(url: string, visitTime?: number): Promise<
       }
     }
 
-    const chosen = visits.find((visit) => visitTime !== undefined && visit.visitTime === visitTime) ?? newest
+    const chosen = visits.find((visit) => visitTimeMs !== undefined && visit.visitTime === visitTimeMs) ?? newest
 
     return {
       url,

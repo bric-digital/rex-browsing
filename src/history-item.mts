@@ -18,12 +18,12 @@ export interface HistoryItemFields {
  * when Chrome holds none: a redirect step search does not return, or a URL
  * deleted since the visit.
  */
-export async function historyItemFields(url: string, visitTime: number): Promise<HistoryItemFields | null> {
+export async function historyItemFields(url: string, visitTimeMs: number): Promise<HistoryItemFields | null> {
   try {
     // Search matches by words, so a short URL shares its words with many
     // others. Bounding by the visit's time keeps its own item in the results,
     // since that item was visited at or after it.
-    const items = await chrome.history.search({ text: url, startTime: visitTime, maxResults: 0 })
+    const items = await chrome.history.search({ text: url, startTime: visitTimeMs, maxResults: 0 })
     const item = items.find((candidate) => candidate.url === url)
 
     if (item === undefined) {

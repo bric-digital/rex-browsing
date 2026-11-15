@@ -44,7 +44,7 @@ export interface OpenerRecord extends StoredEdge {
 interface PendingOpener {
   /** Resolved asynchronously; reserved synchronously so a fast first navigation still finds it. */
   openerVisitId: Promise<string | null>;
-  createdAt: number;
+  createdAtMs: number;
 }
 
 export class OpenerStore extends RecordStore<OpenerRecord> {
@@ -123,7 +123,7 @@ export class TabOpenerTracker {
 
     this.pending.set(tab.id, {
       openerVisitId: this.resolveOpenerVisit(tab.openerTabId),
-      createdAt: Date.now()
+      createdAtMs: Date.now()
     })
 
     return true
@@ -148,7 +148,7 @@ export class TabOpenerTracker {
 
     this.pending.delete(tabId)
 
-    if (Date.now() - entry.createdAt > FIRST_NAVIGATION_WINDOW_MS) {
+    if (Date.now() - entry.createdAtMs > FIRST_NAVIGATION_WINDOW_MS) {
       return false
     }
 

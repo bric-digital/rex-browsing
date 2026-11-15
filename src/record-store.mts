@@ -65,8 +65,8 @@ export class RecordStore<T extends StoredRecord> {
   }
 
   /** Drop anything older than the cutoff, so a wedged run cannot grow the store. */
-  async sweep(olderThan: number): Promise<number> {
-    const stale = (await this.readAll()).filter((record) => record.visit_time < olderThan)
+  async sweep(olderThanMs: number): Promise<number> {
+    const stale = (await this.readAll()).filter((record) => record.visit_time < olderThanMs)
 
     if (stale.length > 0) {
       await this.forget(stale.map(this.idOf))
