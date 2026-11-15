@@ -50,8 +50,10 @@ export class TabLinker {
       await chrome.storage.session.set({ [STORAGE_KEY]: held.slice(-MAX_HELD) })
     })
 
+    const emittableBefore = Date.now() - this.tolerance()
+
     for (const visit of await this.store.readAll()) {
-      if (this.matches(visit, navigation)) {
+      if (visit.visit_time > emittableBefore && this.matches(visit, navigation)) {
         await this.enqueue(() => this.store.attachLink(storageIdOf(visit), linkFrom(navigation)))
       }
     }

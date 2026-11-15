@@ -27,7 +27,6 @@ test.describe('rex-browsing — real extension', () => {
     userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-browsing-'))
 
     context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
       channel: 'chromium',
       args: [
         `--disable-extensions-except=${extensionPath}`,
@@ -1407,7 +1406,7 @@ test.describe('rex-browsing — real extension', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
         const real = chrome.history.getVisits
-        const visitTime = Date.now() - 1000
+        const visitTime = Date.now() - 100
         chrome.history.getVisits = async () => ([
           { id: '1', visitId: '9001', referringVisitId: '0', visitTime, transition: 'link', isLocal: true }
         ]) as never
@@ -1420,6 +1419,7 @@ test.describe('rex-browsing — real extension', () => {
         return { held }
       }, { url })
 
+      await new Promise((resolve) => setTimeout(resolve, 500))
       const visit = (await drainVisits()).find((e) => e.url === url)
 
       expect(result.held).toBe(true)
@@ -2011,6 +2011,12 @@ test.describe('rex-browsing — real extension', () => {
       }, visitId)
     }
 
+    async function drainedVisitOnceEmittable(visitId: string) {
+      await setTolerance(1)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      return drainedVisit(visitId)
+    }
+
     async function storedNavigations() {
       return serviceWorker.evaluate(async () => {
         return (await chrome.storage.session.get('rexBrowsingTabNavigation')).rexBrowsingTabNavigation
@@ -2025,16 +2031,30 @@ test.describe('rex-browsing — real extension', () => {
 
     test('links a visit to a navigation that arrives after it', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now() - 6000
+      const visitTime = Date.now()
       expect(await captureAt('601', visitTime)).toBe(true)
       expect(await navigate(visitTime)).toBe(true)
 
-      const visit = await drainedVisit('601')
+      const visit = await drainedVisitOnceEmittable('601')
 
       expect(visit.tab_id).toBe(41)
       expect(visit).not.toHaveProperty('session_id')
       expect(visit).not.toHaveProperty('page_events_url_shown_at')
       expect(visit).not.toHaveProperty('navigation_time')
+    })
+
+    test('a navigation does not link a visit old enough to be emitted', async () => {
+      await setTolerance(5000)
+      const visitTime = Date.now() - 6000
+      await captureAt('610', visitTime)
+      expect(await navigate(visitTime + 4000)).toBe(true)
+
+      const visit = await drainedVisit('610')
+      const again = await drainedVisit('610')
+
+      expect(visit).toBeDefined()
+      expect(visit).not.toHaveProperty('tab_id')
+      expect(again).toBeUndefined()
     })
 
     test('links a visit to a navigation that arrived before it', async () => {
@@ -2075,7 +2095,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('a visit in one URL open in two tabs takes the newest navigation\'s tab alone', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now() - 6000
+      const visitTime = Date.now()
       const openTab = await serviceWorker.evaluate(async () => {
         const tabs = await chrome.tabs.query({})
         return { id: tabs[0].id, windowId: tabs[0].windowId }
@@ -2086,7 +2106,7 @@ test.describe('rex-browsing — real extension', () => {
       await navigate(visitTime, { tabId: openTab.id })
       await navigate(visitTime + 50, { tabId: missingTabId })
 
-      const visit = await drainedVisit('605')
+      const visit = await drainedVisitOnceEmittable('605')
 
       expect(visit.tab_id).toBe(missingTabId)
       expect(visit).not.toHaveProperty('window_id')
@@ -2094,7 +2114,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('a navigation in an open tab links its window', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now() - 6000
+      const visitTime = Date.now()
       const openTab = await serviceWorker.evaluate(async () => {
         const tabs = await chrome.tabs.query({})
         return { id: tabs[0].id, windowId: tabs[0].windowId }
@@ -2103,7 +2123,7 @@ test.describe('rex-browsing — real extension', () => {
       await captureAt('606', visitTime)
       await navigate(visitTime, { tabId: openTab.id })
 
-      const visit = await drainedVisit('606')
+      const visit = await drainedVisitOnceEmittable('606')
 
       expect(visit.tab_id).toBe(openTab.id)
       expect(visit.window_id).toBe(openTab.windowId)
@@ -2111,7 +2131,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('an older navigation arriving after a newer one does not roll the stored link back', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now() - 6000
+      const visitTime = Date.now()
       await captureAt('607', visitTime)
       await navigate(visitTime + 1000)
       await serviceWorker.evaluate(async () => {
@@ -2119,7 +2139,7 @@ test.describe('rex-browsing — real extension', () => {
       })
       await navigate(visitTime - 1000, { tabId: 43 })
 
-      const visit = await drainedVisit('607')
+      const visit = await drainedVisitOnceEmittable('607')
 
       expect(visit.tab_id).toBe(41)
     })
@@ -2141,7 +2161,7 @@ test.describe('rex-browsing — real extension', () => {
 
     test('links a visit recorded without ids', async () => {
       await setTolerance(5000)
-      const visitTime = Date.now() - 6000
+      const visitTime = Date.now()
 
       await serviceWorker.evaluate(async ({ url, visitTime }) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2149,6 +2169,8 @@ test.describe('rex-browsing — real extension', () => {
       }, { url: LINKED_URL, visitTime })
       await navigate(visitTime)
 
+      await setTolerance(1)
+      await new Promise((resolve) => setTimeout(resolve, 10))
       const visit = await serviceWorker.evaluate(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const g = self as any
@@ -2256,7 +2278,6 @@ test.describe('rex-browsing — real extension', () => {
         const extensionPath = path.join(__dirname, '../extension')
         restartUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-browsing-restart-'))
         restartContext = await chromium.launchPersistentContext(restartUserDataDir, {
-          headless: true,
           channel: 'chromium',
           args: [
             `--disable-extensions-except=${extensionPath}`,

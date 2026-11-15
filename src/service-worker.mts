@@ -114,7 +114,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     removed: (tabId: number) => void;
   } | null = null
 
-  private navigationListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null
+  private navigationListener: ((details: { tabId: number; url: string; frameId: number; timeStamp: number }) => void) | null = null
 
   moduleName(): string {
     return 'rex-browsing'
@@ -214,7 +214,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   /**
-   * A main-frame navigation a tab committed. Held until a visit to the same
+   * A main-frame navigation event of a tab. Held until a visit to the same
    * URL near its time is, or has been, recorded.
    */
   async captureNavigation(details: { tabId: number, url: string, frameId: number, timeStamp: number }): Promise<boolean> {

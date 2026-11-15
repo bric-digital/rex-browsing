@@ -64,7 +64,7 @@ At each drain, one `pdk-app-event` per address that was recorded over the ceilin
 
 ### `rex-browsing-opener`
 
-Chrome records no referrer across a tab boundary, so a result opened in a new tab arrives with referring visit id `0`. With `tab_opener_edges` on, the first visit in a new tab is attributed to the page that opened it, from `chrome.tabs`. Fields: `visit_id`, `referring_visit_id` (the opener page's visit), `visit_time`, `date`, `transition`, `url`. In a redirect chain the edge attaches to the chain's first visit. The `visit_id` can name a visit whose `rex-browsing-visit` was recorded without ids, so no visit record carries it; join such an opener record to its visit by `url` and `visit_time`. Needs the `tabs` permission in the host extension.
+Chrome records no referrer across a tab boundary, so a result opened in a new tab arrives with referring visit id `0`. With `tab_opener_edges` on, the first visit in a new tab is attributed to the page that opened it, from `chrome.tabs`. Fields: `visit_id`, `referring_visit_id` (the opener page's visit), `visit_time`, `date`, `transition`, `url`. In a redirect chain the edge attaches to the chain's first visit. The `visit_id` can name a visit whose `rex-browsing-visit` was recorded without ids, so no visit record carries it; join such an opener record to its visit by `url` and `visit_time`. An opener record can be emitted in an earlier drain than the visit it points to, so join on `visit_id` across uploads. Needs the `tabs` permission in the host extension.
 
 ### `rex-browsing-page`
 
@@ -80,7 +80,7 @@ A visit is linked to the tab it happened in from the module's own `chrome.webNav
 - **While disabled.** The default. The module holds no listeners and emits nothing. Anything it holds is discarded.
 - **Before an identifier exists.** Records are held, not emitted, so nothing goes out unattributed. They are emitted once rex-core's `getIdentifier` returns one.
 - **Age.** A record never emitted is discarded at the next drain after it passes `max_record_age_days`, whether or not the module is enabled or has an identifier.
-- **Emission.** The host sends `triggerBrowsingDrain`. Each emitted record is dispatched, then deleted; a visit younger than `tab_link_tolerance_ms` is not emitted and waits for a later drain. A worker killed between the two re-emits it on the next drain; a duplicate can be removed in analysis, a loss cannot. A visit is emitted once it is older than `tab_link_tolerance_ms`, so its tab fields are in place first; a navigation arriving later than that is not attached.
+- **Emission.** The host sends `triggerBrowsingDrain`. A visit is emitted once it is older than `tab_link_tolerance_ms`, so its tab fields are in place first, and a visit old enough to be emitted takes no new tab link. Each emitted record is dispatched, then deleted; a worker killed between the two re-emits it on the next drain, and duplicates share `visit_id`, so a duplicate can be removed in analysis where a loss cannot.
 
 ## Messages
 
