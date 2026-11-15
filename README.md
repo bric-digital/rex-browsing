@@ -72,7 +72,7 @@ With `internal_pages` on, the browser's own pages (`chrome://`, `chrome-untruste
 
 ## Tab link
 
-A visit is linked to the tab it happened in from the module's own `chrome.webNavigation` events (`onBeforeNavigate`, `onCommitted`, `onHistoryStateUpdated`) in each tab's main frame. A navigation matches a visit when the address is the same and the navigation's time is within `tab_link_tolerance_ms` of the visit time; the newest matching navigation decides the tab, and fields of two tabs never combine. Either may arrive first. A single server redirect's step and landing both get tab fields; the middle steps of a longer chain carry none. Tab fields never rely on `referring_visit_id`. Set the tolerance to `0` to turn linking off, which also removes the `webNavigation` listeners. Without the `webNavigation` permission, visits are recorded without tab fields.
+A visit is linked to the tab it happened in from the module's own `chrome.webNavigation` events (`onBeforeNavigate`, `onCommitted`, `onHistoryStateUpdated`, `onReferenceFragmentUpdated`) in each tab's main frame, including a prerendered page when it is shown. A navigation matches a visit when the address is the same and the navigation's time is within `tab_link_tolerance_ms` of the visit time; the newest matching navigation decides the tab, and fields of two tabs never combine. Either may arrive first. A single server redirect's step and landing both get tab fields; the middle steps of a longer chain carry none. Tab fields never rely on `referring_visit_id`. Set the tolerance to `0` to turn linking off, which also removes the `webNavigation` listeners. Without the `webNavigation` permission, visits are recorded without tab fields.
 
 ## Lifecycle
 

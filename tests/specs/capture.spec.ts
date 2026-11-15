@@ -1319,6 +1319,13 @@ test.describe('rex-browsing — real extension', () => {
           return
         }
 
+        if (url.pathname === '/anchor') {
+          res.end('<!doctype html><meta charset="utf-8"><title>Anchor</title>'
+            + '<a id="jump" href="#section">jump</a><h2 id="section">Section</h2>'
+            + "<script>setTimeout(function () { document.getElementById('jump').click() }, 300)</script>")
+          return
+        }
+
         res.end(`<!doctype html><meta charset="utf-8"><title>Plain</title><h1>${url.pathname}</h1>`)
       })
       await new Promise<void>((resolve) => server.listen(PORT, '127.0.0.1', resolve))
@@ -1397,6 +1404,16 @@ test.describe('rex-browsing — real extension', () => {
 
       const visit = (await drainVisits()).find((e) => e.url === `${ORIGIN}/spa-next${query}`)
 
+      expect(visit.tab_id).toBe(ids.tabId)
+    })
+
+    test('a jump to an anchor on the page carries its tab', async () => {
+      const query = `?marker=${marker()}`
+      const ids = await openAndClose(`${ORIGIN}/anchor${query}`)
+
+      const visit = (await drainVisits()).find((e) => e.url === `${ORIGIN}/anchor${query}#section`)
+
+      expect(visit).toBeDefined()
       expect(visit.tab_id).toBe(ids.tabId)
     })
 

@@ -535,6 +535,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     chrome.webNavigation.onBeforeNavigate.addListener(this.navigationListener)
     chrome.webNavigation.onCommitted.addListener(this.navigationListener)
     chrome.webNavigation.onHistoryStateUpdated.addListener(this.navigationListener)
+    chrome.webNavigation.onReferenceFragmentUpdated.addListener(this.navigationListener)
   }
 
   private stopListeningForNavigation(): void {
@@ -545,6 +546,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     chrome.webNavigation.onBeforeNavigate.removeListener(this.navigationListener)
     chrome.webNavigation.onCommitted.removeListener(this.navigationListener)
     chrome.webNavigation.onHistoryStateUpdated.removeListener(this.navigationListener)
+    chrome.webNavigation.onReferenceFragmentUpdated.removeListener(this.navigationListener)
     this.navigationListener = null
   }
 
