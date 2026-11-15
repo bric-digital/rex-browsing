@@ -389,7 +389,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     // Checked here as well as by removing the listener, deliberately: two
     // independent guards, and the failure direction of each is to collect
     // nothing.
-    if (!this.isAccepting() || item.url === undefined || !isRecordedScheme(item.url)) {
+    if (!this.isCaptureEnabled() || item.url === undefined || !isRecordedScheme(item.url)) {
       return false
     }
 
@@ -435,7 +435,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
   /** A tab committed a URL Chrome may keep out of history. */
   async captureInternalPage(tabId: number, url: string): Promise<boolean> {
-    if (!this.isAccepting() || !this.config.internal_pages) {
+    if (!this.isCaptureEnabled() || !this.config.internal_pages) {
       return false
     }
 
@@ -447,7 +447,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
    * URL near its time is, or has been, recorded.
    */
   async captureNavigation(details: { tabId: number, url: string, frameId: number, timeStamp: number }): Promise<boolean> {
-    if (!this.isAccepting() || this.config.tab_link_tolerance_ms <= 0 || details.frameId !== 0
+    if (!this.isCaptureEnabled() || this.config.tab_link_tolerance_ms <= 0 || details.frameId !== 0
       || details.tabId < 0 || !isRecordedScheme(details.url)) {
       return false
     }
@@ -472,7 +472,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
   }
 
-  private isAccepting(): boolean {
+  private isCaptureEnabled(): boolean {
     return this.configured && this.config.enabled
   }
 
