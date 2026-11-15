@@ -32,19 +32,13 @@ export class PageStore extends EdgeStore<PageRecord> {
 
 export interface InternalPageDependencies {
   store: PageStore;
-  /** The study's `internal_pages` setting. */
-  wanted: () => boolean;
 }
 
 export class InternalPageRecorder {
   constructor(private readonly deps: InternalPageDependencies) {}
 
-  isWanted(): boolean {
-    return this.deps.wanted()
-  }
-
   async pageCommitted(tabId: number, url: string): Promise<boolean> {
-    if (!this.isWanted() || !isUnrecorded(url)) {
+    if (!isUnrecorded(url)) {
       return false
     }
 

@@ -653,13 +653,13 @@ test.describe('rex-browsing — real extension', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const p = (self as any).rexBrowsingPlugin
       const returned = p.updateConfiguration({ internal_pages: true })
-      const wanted = p.internalPages.isWanted()
+      const wanted = p.currentConfig().internal_pages
       p.updateConfiguration({})
 
       return {
         isPromise: returned instanceof Promise,
         wanted,
-        wantedByDefault: p.internalPages.isWanted(),
+        wantedByDefault: p.currentConfig().internal_pages,
       }
     })
 

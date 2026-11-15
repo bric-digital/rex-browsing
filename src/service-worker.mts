@@ -132,8 +132,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   })
   readonly pageStore = new PageStore()
   readonly internalPages = new InternalPageRecorder({
-    store: this.pageStore,
-    wanted: () => this.config.internal_pages
+    store: this.pageStore
   })
 
   private config: BrowsingConfig = DEFAULT_CONFIG
@@ -239,7 +238,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       this.stopListeningForVisits()
     }
 
-    if (this.config.enabled && (this.config.tab_opener_edges || this.internalPages.isWanted())) {
+    if (this.config.enabled && (this.config.tab_opener_edges || this.config.internal_pages)) {
       this.startListeningForOpenersAndPages()
     } else {
       this.stopListeningForOpenersAndPages()
@@ -431,7 +430,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
   /** A tab committed a URL Chrome may keep out of history. */
   async captureInternalPage(tabId: number, url: string): Promise<boolean> {
-    if (!this.isAccepting()) {
+    if (!this.isAccepting() || !this.config.internal_pages) {
       return false
     }
 
