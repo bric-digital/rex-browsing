@@ -1284,7 +1284,7 @@ test.describe('rex-browsing — real extension', () => {
         const afterSweep = (await p.visitStore.readAll()).map((r: { url: string }) => r.url)
 
         p.updateConfiguration({ enabled: false })
-        await p.reconcileStore()
+        await p.discardStoredIfDisabled()
         const afterDisable = (await p.visitStore.readAll()).length
         p.updateConfiguration({ enabled: true })
 

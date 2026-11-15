@@ -203,7 +203,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
       this.updateConfiguration(all['browsing'] as Partial<BrowsingConfig> | undefined)
 
-      await this.reconcileStore()
+      await this.discardStoredIfDisabled()
     } catch (error) {
       console.error('[rex-browsing] Failed to load configuration:', error)
     }
@@ -223,7 +223,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
    * Assigns configuration. Synchronous on purpose: a test, a host, or another
    * module can hand this module its settings directly, with no server round trip
    * and nothing to fake. Anything asynchronous a change implies is the caller's,
-   * immediately after — see reconcileStore.
+   * immediately after: see discardStoredIfDisabled.
    */
   updateConfiguration(section: Partial<BrowsingConfig> | undefined): void {
     this.config = { ...DEFAULT_CONFIG, ...(section ?? {}) }
@@ -252,15 +252,20 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   /** Discard what is already stored when the configuration now in force disables the module. */
-  async reconcileStore(): Promise<void> {
-    if (!this.config.enabled) {
-      const discarded = await this.visitStore.clear() + await this.openerStore.clear()
-        + await this.pageStore.clear()
-      await this.tabLinker.clear()
+  async discardStoredIfDisabled(): Promise<void> {
+    if (this.config.enabled) {
+      return
+    }
 
-      if (discarded > 0) {
-        console.log(`[rex-browsing] Disabled; discarded ${discarded} stored record(s).`)
-      }
+    const discardedVisits = await this.visitStore.clear()
+    const discardedOpeners = await this.openerStore.clear()
+    const discardedPages = await this.pageStore.clear()
+    const discarded = discardedVisits + discardedOpeners + discardedPages
+
+    await this.tabLinker.clear()
+
+    if (discarded > 0) {
+      console.log(`[rex-browsing] Disabled; discarded ${discarded} stored record(s).`)
     }
   }
 
