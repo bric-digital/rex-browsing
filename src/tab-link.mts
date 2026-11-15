@@ -40,9 +40,9 @@ export class TabLinker {
    */
   private writes: Promise<void> = Promise.resolve()
 
-  constructor(private readonly store: VisitStore, private readonly tolerance: () => number) {}
+  constructor(private readonly deps: { store: VisitStore; toleranceMs: () => number }) {}
 
-  async acceptNavigation(navigation: TabNavigation): Promise<void> {
+  async linkNavigation(navigation: TabNavigation): Promise<void> {
     await this.enqueue(async () => {
       const held = await this.readHeld()
 
@@ -50,11 +50,11 @@ export class TabLinker {
       await chrome.storage.session.set({ [STORAGE_KEY]: held.slice(-MAX_HELD) })
     })
 
-    const emittableBefore = Date.now() - this.tolerance()
+    const emittableBefore = Date.now() - this.deps.toleranceMs()
 
-    for (const visit of await this.store.readAll()) {
+    for (const visit of await this.deps.store.readAll()) {
       if (visit.visit_time > emittableBefore && this.matches(visit, navigation)) {
-        await this.enqueue(() => this.store.attachLink(storageIdOf(visit), linkFrom(navigation)))
+        await this.enqueue(() => this.deps.store.attachLink(storageIdOf(visit), linkFrom(navigation)))
       }
     }
   }
@@ -63,7 +63,7 @@ export class TabLinker {
     const matching = (await this.readHeld()).filter((navigation) => this.matches(visit, navigation))
 
     if (matching.length > 0) {
-      await this.enqueue(() => this.store.attachLink(storageIdOf(visit), linkFrom(newest(matching))))
+      await this.enqueue(() => this.deps.store.attachLink(storageIdOf(visit), linkFrom(newest(matching))))
     }
   }
 
@@ -80,11 +80,11 @@ export class TabLinker {
   }
 
   private matches(visit: VisitRecord, navigation: TabNavigation): boolean {
-    const tolerance = this.tolerance()
+    const toleranceMs = this.deps.toleranceMs()
 
-    return tolerance > 0
+    return toleranceMs > 0
       && visit.url === navigation.url
-      && Math.abs(visit.visit_time - navigation.time) <= tolerance
+      && Math.abs(visit.visit_time - navigation.time) <= toleranceMs
   }
 
   private async readHeld(): Promise<TabNavigation[]> {

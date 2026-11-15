@@ -121,7 +121,10 @@ function identifiedVisitEvent(record: IdentifiedVisitRecord, item: HistoryItemFi
 
 class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   readonly visitStore = new VisitStore()
-  readonly tabLinker = new TabLinker(this.visitStore, () => this.config.tab_link_tolerance_ms)
+  readonly tabLinker = new TabLinker({
+    store: this.visitStore,
+    toleranceMs: () => this.config.tab_link_tolerance_ms
+  })
   readonly openerStore = new OpenerStore()
   readonly tabOpeners = new TabOpenerTracker({
     store: this.openerStore,
@@ -447,7 +450,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
     const windowId = await this.windowOf(details.tabId)
 
-    await this.tabLinker.acceptNavigation({
+    await this.tabLinker.linkNavigation({
       url: details.url,
       tab_id: details.tabId,
       ...(windowId === undefined ? {} : { window_id: windowId }),
