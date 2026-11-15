@@ -406,7 +406,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   /**
    * Keyed by visit id, so capturing the same visit twice writes the same record
    * rather than a duplicate. A visit whose ids cannot be had is still recorded.
-   * `visitCount` already includes the visit being recorded.
+   * `item.visitCount` already includes the visit being recorded.
    */
   private async recordVisit(item: chrome.history.HistoryItem, url: string): Promise<VisitRecord> {
     const title = item.title ?? ''
@@ -602,6 +602,41 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     return emittedVisitIds
   }
 
+  /** One event per URL whose visits in this drain went over the ceiling, mirroring rex-history's. */
+  private async emitCeilingEvents(records: VisitRecord[], nowMs: number): Promise<void> {
+    const overByUrl = new Map<string, { visitTimeMs: number; ceiling: number | undefined; count: number }>()
+
+    for (const record of records) {
+      if (record.ids_unavailable === 'over_ceiling') {
+        const seen = overByUrl.get(record.url)
+        const count = (seen?.count ?? 0) + 1
+
+        // The earliest visit's ceiling, since that is when the address went over it.
+        if (seen === undefined || record.visit_time < seen.visitTimeMs) {
+          overByUrl.set(record.url, { visitTimeMs: record.visit_time, ceiling: record.ceiling, count })
+        } else {
+          seen.count = count
+        }
+      }
+    }
+
+    for (const [url, over] of overByUrl) {
+      const item = await historyItemFields(url, over.visitTimeMs)
+
+      dispatchEvent({
+        name: 'pdk-app-event',
+        event_name: 'rex-browsing-visit-ceiling-exceeded',
+        event_details: {
+          domain: registeredDomain(url),
+          ...(item?.visit_count === undefined ? {} : { visit_count: item.visit_count }),
+          ...(over.ceiling === undefined ? {} : { ceiling: over.ceiling }),
+          visits_in_drain: over.count,
+          date: nowMs
+        }
+      })
+    }
+  }
+
   private emitOpeners(openers: OpenerRecord[], visits: VisitRecord[]): string[] {
     const emittedOpenerIds: string[] = []
 
@@ -642,41 +677,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
 
     return emittedPageIds
-  }
-
-  /** One event per URL whose visits in this drain went over the ceiling, mirroring rex-history's. */
-  private async emitCeilingEvents(records: VisitRecord[], nowMs: number): Promise<void> {
-    const overByUrl = new Map<string, { visitTimeMs: number; ceiling: number | undefined; count: number }>()
-
-    for (const record of records) {
-      if (record.ids_unavailable === 'over_ceiling') {
-        const seen = overByUrl.get(record.url)
-        const count = (seen?.count ?? 0) + 1
-
-        // The earliest visit's ceiling, since that is when the address went over it.
-        if (seen === undefined || record.visit_time < seen.visitTimeMs) {
-          overByUrl.set(record.url, { visitTimeMs: record.visit_time, ceiling: record.ceiling, count })
-        } else {
-          seen.count = count
-        }
-      }
-    }
-
-    for (const [url, over] of overByUrl) {
-      const item = await historyItemFields(url, over.visitTimeMs)
-
-      dispatchEvent({
-        name: 'pdk-app-event',
-        event_name: 'rex-browsing-visit-ceiling-exceeded',
-        event_details: {
-          domain: registeredDomain(url),
-          ...(item?.visit_count === undefined ? {} : { visit_count: item.visit_count }),
-          ...(over.ceiling === undefined ? {} : { ceiling: over.ceiling }),
-          visits_in_drain: over.count,
-          date: nowMs
-        }
-      })
-    }
   }
 
   /** The identifier belongs to rex-core; an empty or absent one means the participant has none yet. */
