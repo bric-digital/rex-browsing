@@ -28,6 +28,10 @@ function linkFrom(navigation: TabNavigation): TabLink {
   }
 }
 
+export function isEmittable(visitTimeMs: number, nowMs: number, toleranceMs: number): boolean {
+  return visitTimeMs <= nowMs - toleranceMs
+}
+
 function newest(navigations: TabNavigation[]): TabNavigation {
   return navigations.reduce((latest, navigation) => (navigation.time >= latest.time ? navigation : latest))
 }
@@ -50,10 +54,11 @@ export class TabLinker {
       await chrome.storage.session.set({ [STORAGE_KEY]: held.slice(-MAX_HELD) })
     })
 
-    const emittableBefore = Date.now() - this.deps.toleranceMs()
+    const nowMs = Date.now()
+    const toleranceMs = this.deps.toleranceMs()
 
     for (const visit of await this.deps.store.readAll()) {
-      if (visit.visit_time > emittableBefore && this.matches(visit, navigation)) {
+      if (isEmittable(visit.visit_time, nowMs, toleranceMs) === false && this.matches(visit, navigation)) {
         await this.enqueue(() => this.deps.store.attachLink(storageIdOf(visit), linkFrom(navigation)))
       }
     }

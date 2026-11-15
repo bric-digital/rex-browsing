@@ -27,7 +27,7 @@ import {
 import { historyItemFields, registeredDomain, type HistoryItemFields } from './history-item.mjs'
 import { OpenerStore, TabOpenerTracker, chainRoot, type OpenerRecord } from './tab-opener.mjs'
 import { InternalPageRecorder, PageStore, type PageRecord } from './internal-pages.mjs'
-import { TabLinker } from './tab-link.mjs'
+import { TabLinker, isEmittable } from './tab-link.mjs'
 
 type HistoryCounts = 'last_visit_time' | 'visit_count' | 'typed_count'
 
@@ -519,7 +519,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       }
 
       const visits = await this.visitStore.readAll()
-      const emittable = visits.filter((visit) => visit.visit_time <= now - this.config.tab_link_tolerance_ms)
+      const emittable = visits.filter((visit) => isEmittable(visit.visit_time, now, this.config.tab_link_tolerance_ms))
       const openers = await this.openerStore.readAll()
       const pages = await this.pageStore.readAll()
 
