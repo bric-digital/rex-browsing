@@ -440,7 +440,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   async captureOpenerNavigation(tabId: number, url: string): Promise<boolean> {
-    if (!this.isCaptureEnabled()) {
+    if (!this.isCaptureEnabled() || !this.config.tab_opener_edges) {
       return false
     }
 

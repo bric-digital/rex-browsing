@@ -1850,6 +1850,34 @@ test.describe('rex-browsing — real extension', () => {
       expect(result.whenEnabled).toEqual({ reserved: true, held: true, stored: true, openers: 1 })
       expect(result.whenDisabled).toEqual({ reserved: false, held: false, stored: false, openers: 0 })
     })
+
+    test('an opener pending when tab_opener_edges turns off is not recorded while internal pages keep the listeners', async () => {
+      const result = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (self as any).rexBrowsingPlugin
+        const tabId = 616161
+        const real = chrome.history.getVisits
+        chrome.history.getVisits = async () => ([
+          { id: '1', visitId: '89', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true }
+        ]) as never
+
+        try {
+          p.updateConfiguration({ enabled: true, tab_opener_edges: false, internal_pages: true })
+          p.tabOpeners.pending.set(tabId, { openerVisitId: Promise.resolve('3'), createdAtMs: Date.now() })
+          const listening = p.isListeningForOpenersAndPages()
+          const stored = await p.captureOpenerNavigation(tabId, 'https://www.example.com/opened')
+          const openers = (await p.openerStore.readAll()).length
+          return { listening, stored, openers }
+        } finally {
+          chrome.history.getVisits = real
+          p.tabOpeners.forgetAll()
+          await p.openerStore.clear()
+          p.updateConfiguration({})
+        }
+      })
+
+      expect(result).toEqual({ listening: true, stored: false, openers: 0 })
+    })
   })
 
   // -------------------------------------------------------------------------
