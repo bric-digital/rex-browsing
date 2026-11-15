@@ -16,10 +16,17 @@
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
 import { isRecordedScheme, newestVisit } from './visit-lookup.mjs'
 import type { RexVisitRecord } from '@bric/rex-types/types'
-import { VisitStore, storageIdOf, type IdsUnavailable, type VisitRecord } from './visit-store.mjs'
-import { historyItemFields, registeredDomain } from './history-item.mjs'
-import { OpenerStore, TabOpenerTracker, chainRoot } from './tab-opener.mjs'
-import { InternalPageRecorder, PageStore } from './internal-pages.mjs'
+import {
+  VisitStore,
+  storageIdOf,
+  type IdentifiedVisitRecord,
+  type IdsUnavailable,
+  type VisitRecord,
+  type VisitRecordWithoutIds
+} from './visit-store.mjs'
+import { historyItemFields, registeredDomain, type HistoryItemFields } from './history-item.mjs'
+import { OpenerStore, TabOpenerTracker, chainRoot, type OpenerRecord } from './tab-opener.mjs'
+import { InternalPageRecorder, PageStore, type PageRecord } from './internal-pages.mjs'
 import { TabLinker } from './tab-link.mjs'
 
 type HistoryCounts = 'last_visit_time' | 'visit_count' | 'typed_count'
@@ -81,6 +88,35 @@ function tabFields(record: VisitRecord): { tab_id?: number, window_id?: number }
       tab_id: record.link.tab_id,
       ...(record.link.window_id === undefined ? {} : { window_id: record.link.window_id })
     }
+}
+
+function visitWithoutIdsEvent(record: VisitRecordWithoutIds, item: HistoryItemFields | null): BrowsingVisitEvent {
+  return {
+    name: 'rex-browsing-visit',
+    url: record.url,
+    visit_time: record.visit_time,
+    date: record.visit_time,
+    domain: registeredDomain(record.url),
+    ids_unavailable: record.ids_unavailable,
+    ...(item ?? { title: record.title }),
+    ...tabFields(record)
+  }
+}
+
+function identifiedVisitEvent(record: IdentifiedVisitRecord, item: HistoryItemFields | null): BrowsingVisitEvent {
+  return {
+    name: 'rex-browsing-visit',
+    url: record.url,
+    domain: registeredDomain(record.url),
+    visit_time: record.visit_time,
+    transition_type: record.transition_type,
+    is_local: record.is_local,
+    date: record.visit_time,
+    visit_id: record.visit_id,
+    referring_visit_id: record.referring_visit_id,
+    ...(item ?? { title: '' }),
+    ...tabFields(record)
+  }
 }
 
 class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
@@ -466,10 +502,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       // Sweep first and unconditionally, so a record past its age is discarded
       // rather than held without bound while the module is unconfigured,
       // disabled, or waiting on an identifier.
-      const cutoff = now - (this.config.max_record_age_days * 24 * 60 * 60 * 1000)
-      await this.visitStore.sweep(cutoff)
-      await this.openerStore.sweep(cutoff)
-      await this.pageStore.sweep(cutoff)
+      await this.sweepExpired(now)
 
       // A host drains on its own cadence, so being switched off has to stop
       // emission here rather than only stopping the alarm being scheduled.
@@ -482,111 +515,112 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         return 0
       }
 
-      const records = await this.visitStore.readAll()
-      const emittable = records.filter((record) => record.visit_time <= now - this.config.tab_link_tolerance_ms)
+      const visits = await this.visitStore.readAll()
+      const emittable = visits.filter((visit) => visit.visit_time <= now - this.config.tab_link_tolerance_ms)
       const openers = await this.openerStore.readAll()
       const pages = await this.pageStore.readAll()
-      const emitted: string[] = []
-      const emittedOpeners: string[] = []
-      const emittedPages: string[] = []
 
-      for (const record of emittable) {
-        if (record.ids_unavailable !== undefined) {
-          const item = await historyItemFields(record.url, record.visit_time)
-          const visit: BrowsingVisitEvent = {
-            name: 'rex-browsing-visit',
-            url: record.url,
-            visit_time: record.visit_time,
-            date: record.visit_time,
-            domain: registeredDomain(record.url),
-            ids_unavailable: record.ids_unavailable,
-            ...(item ?? { title: record.title }),
-            ...tabFields(record)
-          }
-
-          dispatchEvent(visit)
-
-          emitted.push(storageIdOf(record))
-          continue
-        }
-
-        // Read at drain rather than at visit time, because onVisited often fires
-        // before the page's title is known.
-        const item = await historyItemFields(record.url, record.visit_time)
-
-        const visit: BrowsingVisitEvent = {
-          name: 'rex-browsing-visit',
-          url: record.url,
-          domain: registeredDomain(record.url),
-          visit_time: record.visit_time,
-          transition_type: record.transition_type,
-          is_local: record.is_local,
-          date: record.visit_time,
-          visit_id: record.visit_id,
-          referring_visit_id: record.referring_visit_id,
-          ...(item ?? { title: '' }),
-          ...tabFields(record)
-        }
-
-        dispatchEvent(visit)
-
-        emitted.push(record.visit_id)
-      }
+      const emittedVisitIds = await this.emitVisits(emittable)
 
       await this.emitCeilingEvents(emittable, now)
 
-      // Resolved against the visits read in this same drain, so a redirect chain
-      // in the new tab attaches the edge to its root rather than its landing.
-      for (const record of openers) {
-        const root = chainRoot(record, records)
-
-        dispatchEvent({
-          name: 'rex-browsing-opener',
-          visit_id: root.visit_id,
-          referring_visit_id: record.opener_visit_id,
-          visit_time: root.visit_time,
-          transition: record.transition,
-          date: root.visit_time,
-          url: root.url
-        })
-
-        emittedOpeners.push(record.visit_id)
-      }
-
-      for (const record of pages) {
-        dispatchEvent({
-          name: 'rex-browsing-page',
-          visit_time: record.visit_time,
-          tab_id: record.tab_id,
-          date: record.visit_time,
-          url: record.url
-        })
-
-        emittedPages.push(record.page_id)
-      }
+      const emittedOpenerIds = this.emitOpeners(openers, visits)
+      const emittedPageIds = this.emitPages(pages)
 
       // Emit, then forget. A worker killed between the two re-emits next cycle;
       // killed in the other order, the visit is gone. A duplicate is recoverable
       // in analysis, a loss is not.
-      if (emitted.length > 0) {
-        await this.visitStore.forget(emitted)
+      if (emittedVisitIds.length > 0) {
+        await this.visitStore.forget(emittedVisitIds)
       }
 
-      if (emittedOpeners.length > 0) {
-        await this.openerStore.forget(emittedOpeners)
+      if (emittedOpenerIds.length > 0) {
+        await this.openerStore.forget(emittedOpenerIds)
       }
 
-      if (emittedPages.length > 0) {
-        await this.pageStore.forget(emittedPages)
+      if (emittedPageIds.length > 0) {
+        await this.pageStore.forget(emittedPageIds)
       }
 
-      return emitted.length + emittedOpeners.length + emittedPages.length
+      return emittedVisitIds.length + emittedOpenerIds.length + emittedPageIds.length
     } catch (error) {
       console.error('[rex-browsing] Drain failed:', error)
       return 0
     } finally {
       this.draining = false
     }
+  }
+
+  private async sweepExpired(nowMs: number): Promise<void> {
+    const cutoff = nowMs - (this.config.max_record_age_days * 24 * 60 * 60 * 1000)
+    await this.visitStore.sweep(cutoff)
+    await this.openerStore.sweep(cutoff)
+    await this.pageStore.sweep(cutoff)
+  }
+
+  private async emitVisits(visits: VisitRecord[]): Promise<string[]> {
+    const emittedVisitIds: string[] = []
+
+    for (const visit of visits) {
+      // Read at drain rather than at visit time, because onVisited often fires
+      // before the page's title is known.
+      const item = await historyItemFields(visit.url, visit.visit_time)
+      let event: BrowsingVisitEvent
+
+      if (visit.ids_unavailable === undefined) {
+        event = identifiedVisitEvent(visit, item)
+      } else {
+        event = visitWithoutIdsEvent(visit, item)
+      }
+
+      dispatchEvent(event)
+
+      emittedVisitIds.push(storageIdOf(visit))
+    }
+
+    return emittedVisitIds
+  }
+
+  private emitOpeners(openers: OpenerRecord[], visits: VisitRecord[]): string[] {
+    const emittedOpenerIds: string[] = []
+
+    // Resolved against the visits read in this same drain, so a redirect chain
+    // in the new tab attaches the edge to its root rather than its landing.
+    for (const opener of openers) {
+      const root = chainRoot(opener, visits)
+
+      dispatchEvent({
+        name: 'rex-browsing-opener',
+        visit_id: root.visit_id,
+        referring_visit_id: opener.opener_visit_id,
+        visit_time: root.visit_time,
+        transition: opener.transition,
+        date: root.visit_time,
+        url: root.url
+      })
+
+      emittedOpenerIds.push(opener.visit_id)
+    }
+
+    return emittedOpenerIds
+  }
+
+  private emitPages(pages: PageRecord[]): string[] {
+    const emittedPageIds: string[] = []
+
+    for (const page of pages) {
+      dispatchEvent({
+        name: 'rex-browsing-page',
+        visit_time: page.visit_time,
+        tab_id: page.tab_id,
+        date: page.visit_time,
+        url: page.url
+      })
+
+      emittedPageIds.push(page.page_id)
+    }
+
+    return emittedPageIds
   }
 
   /** One event per URL whose visits in this drain went over the ceiling, mirroring rex-history's. */
