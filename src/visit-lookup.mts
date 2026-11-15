@@ -8,7 +8,7 @@
  * same URL that committed before the lookup returned.
  */
 
-export interface BrowsingVisit {
+export interface ResolvedVisit {
   /** The address the ids were resolved from. */
   url: string;
   visitId: string;
@@ -52,7 +52,7 @@ export async function visitCount(url: string): Promise<number | null> {
  * The visit at `visitTime` when one matches, otherwise the newest. Holds no
  * state, so a function rather than a class.
  */
-export async function newestVisit(url: string, visitTime?: number): Promise<BrowsingVisit | null> {
+export async function visitAtOrNewest(url: string, visitTime?: number): Promise<ResolvedVisit | null> {
   try {
     const visits = await chrome.history.getVisits({ url })
     let newest = visits[0]

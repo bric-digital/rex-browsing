@@ -6,7 +6,7 @@
  * fires before a page's title is known.
  */
 
-import type { BrowsingVisit } from './visit-lookup.mts'
+import type { ResolvedVisit } from './visit-lookup.mts'
 import { RecordStore, type StoredRecord } from './record-store.mjs'
 
 const KEY_PREFIX = 'rexBrowsingVisit:'
@@ -77,7 +77,7 @@ export class VisitStore extends RecordStore<VisitRecord> {
     super(KEY_PREFIX, storageIdOf)
   }
 
-  async record(visit: BrowsingVisit): Promise<VisitRecord> {
+  async record(visit: ResolvedVisit): Promise<VisitRecord> {
     const record: VisitRecord = {
       visit_id: visit.visitId,
       referring_visit_id: visit.referringVisitId,

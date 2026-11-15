@@ -14,7 +14,7 @@
  */
 
 import rexCorePlugin, { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
-import { isRecordedScheme, newestVisit } from './visit-lookup.mjs'
+import { isRecordedScheme, visitAtOrNewest } from './visit-lookup.mjs'
 import type { RexVisitRecord } from '@bric/rex-types/types'
 import {
   VisitStore,
@@ -418,7 +418,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       return this.visitStore.recordWithoutIds(url, title, visitTime, 'over_ceiling', this.config.max_visits_per_url)
     }
 
-    const visit = await newestVisit(url, item.lastVisitTime)
+    const visit = await visitAtOrNewest(url, item.lastVisitTime)
 
     if (visit === null) {
       return this.visitStore.recordWithoutIds(url, title, visitTime, 'lookup_failed')

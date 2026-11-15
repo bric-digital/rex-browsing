@@ -21,7 +21,7 @@
 
 import { RecordStore, type StoredEdge } from './record-store.mjs'
 import type { IdentifiedVisitRecord, VisitRecord } from './visit-store.mjs'
-import { isRecordedScheme, newestVisit, visitCount } from './visit-lookup.mjs'
+import { isRecordedScheme, visitAtOrNewest, visitCount } from './visit-lookup.mjs'
 
 const KEY_PREFIX = 'rexBrowsingOpener:'
 
@@ -162,7 +162,7 @@ export class TabOpenerTracker {
       return false
     }
 
-    const visit = await newestVisit(url)
+    const visit = await visitAtOrNewest(url)
 
     if (visit === null) {
       return false
@@ -212,7 +212,7 @@ export class TabOpenerTracker {
       return null
     }
 
-    const visit = await newestVisit(url)
+    const visit = await visitAtOrNewest(url)
 
     return visit === null ? null : visit.visitId
   }
