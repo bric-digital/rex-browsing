@@ -152,8 +152,194 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
   }
 
-  currentConfig(): BrowsingConfig {
-    return this.config
+  async setup(): Promise<void> {
+    console.log('[rex-browsing/service-worker] Setting up browsing capture')
+
+    await this.refreshConfiguration()
+  }
+
+  /** rex-core's activation hook: wait for configuration, then hand this module's own section over. */
+  async refreshConfiguration(): Promise<void> {
+    try {
+      const all = await this.waitForConfiguration()
+
+      this.updateConfiguration(all['browsing'] as Partial<BrowsingConfig> | undefined)
+
+      await this.reconcileStore()
+    } catch (error) {
+      console.error('[rex-browsing] Failed to load configuration:', error)
+    }
+  }
+
+  /** Resolves once rex-core has a stored configuration; never resolves if none arrives before the timeout. */
+  private waitForConfiguration(): Promise<Record<string, unknown>> {
+    return new Promise((resolve) => {
+      rexCorePlugin.handleMessage({
+        messageType: 'waitForConfiguration',
+        event: { timeout: CONFIGURATION_TIMEOUT_MS }
+      }, null, resolve)
+    })
+  }
+
+  /**
+   * Assigns configuration. Synchronous on purpose: a test, a host, or another
+   * module can hand this module its settings directly, with no server round trip
+   * and nothing to fake. Anything asynchronous a change implies is the caller's,
+   * immediately after — see reconcileStore.
+   */
+  updateConfiguration(section: Partial<BrowsingConfig> | undefined): void {
+    this.config = { ...DEFAULT_CONFIG, ...(section ?? {}) }
+    this.configured = true
+
+    // Listening follows the enabled flag: a disabled module holds no listener at
+    // all, rather than holding one that declines to act. Both calls are
+    // synchronous, so this stays inside updateConfiguration.
+    if (this.config.enabled) {
+      this.startListening()
+    } else {
+      this.stopListening()
+    }
+
+    if (this.config.enabled && (this.config.tab_opener_edges || this.internalPages.isWanted())) {
+      this.startListeningForTabs()
+    } else {
+      this.stopListeningForTabs()
+    }
+
+    if (this.config.enabled && this.config.tab_link_tolerance_ms > 0) {
+      this.startListeningForNavigation()
+    } else {
+      this.stopListeningForNavigation()
+    }
+  }
+
+  /** Discard what is already stored when the configuration now in force disables the module. */
+  async reconcileStore(): Promise<void> {
+    if (!this.config.enabled) {
+      const discarded = await this.visitStore.clear() + await this.openerStore.clear()
+        + await this.pageStore.clear()
+      await this.tabLinker.clear()
+
+      if (discarded > 0) {
+        console.log(`[rex-browsing] Disabled; discarded ${discarded} stored record(s).`)
+      }
+    }
+  }
+
+  private startListening(): void {
+    if (this.historyListener !== null) {
+      return
+    }
+
+    this.historyListener = (item: chrome.history.HistoryItem) => {
+      this.captureVisit(item).catch((error) => {
+        console.error('[rex-browsing] Capture failed:', error)
+      })
+    }
+
+    chrome.history.onVisited.addListener(this.historyListener)
+  }
+
+  private stopListening(): void {
+    if (this.historyListener === null) {
+      return
+    }
+
+    chrome.history.onVisited.removeListener(this.historyListener)
+    this.historyListener = null
+  }
+
+  /** True while a history listener is registered. Readable for diagnostics. */
+  isListening(): boolean {
+    return this.historyListener !== null
+  }
+
+  private startListeningForTabs(): void {
+    if (this.tabListeners !== null || typeof chrome.tabs?.onCreated?.addListener !== 'function') {
+      return
+    }
+
+    this.tabListeners = {
+      created: (tab) => {
+        if (this.config.tab_opener_edges) {
+          this.tabOpeners.tabCreated(tab)
+        }
+      },
+      updated: (tabId, changeInfo) => {
+        // onUpdated fires for every status change of every tab; only a committed
+        // URL is of interest, for a tab this module is holding or a page Chrome
+        // keeps out of history.
+        if (changeInfo.url === undefined) {
+          return
+        }
+
+        this.tabOpeners.tabNavigated(tabId, changeInfo.url).catch((error) => {
+          console.error('[rex-browsing] Opener capture failed:', error)
+        })
+
+        this.captureInternalPage(tabId, changeInfo.url).catch((error) => {
+          console.error('[rex-browsing] Internal page capture failed:', error)
+        })
+      },
+      removed: (tabId) => {
+        this.tabOpeners.tabRemoved(tabId)
+      }
+    }
+
+    chrome.tabs.onCreated.addListener(this.tabListeners.created)
+    chrome.tabs.onUpdated.addListener(this.tabListeners.updated)
+    chrome.tabs.onRemoved.addListener(this.tabListeners.removed)
+  }
+
+  private stopListeningForTabs(): void {
+    if (this.tabListeners === null) {
+      return
+    }
+
+    chrome.tabs.onCreated.removeListener(this.tabListeners.created)
+    chrome.tabs.onUpdated.removeListener(this.tabListeners.updated)
+    chrome.tabs.onRemoved.removeListener(this.tabListeners.removed)
+    this.tabListeners = null
+    this.tabOpeners.forgetAll()
+  }
+
+  /** True while the tabs listeners are registered. Readable for diagnostics. */
+  isListeningForTabs(): boolean {
+    return this.tabListeners !== null
+  }
+
+  private startListeningForNavigation(): void {
+    if (this.navigationListener !== null || typeof chrome.webNavigation?.onCommitted?.addListener !== 'function') {
+      return
+    }
+
+    this.navigationListener = (details) => {
+      this.captureNavigation(details).catch((error) => {
+        console.error('[rex-browsing] Navigation capture failed:', error)
+      })
+    }
+
+    chrome.webNavigation.onBeforeNavigate.addListener(this.navigationListener)
+    chrome.webNavigation.onCommitted.addListener(this.navigationListener)
+    chrome.webNavigation.onHistoryStateUpdated.addListener(this.navigationListener)
+    chrome.webNavigation.onReferenceFragmentUpdated.addListener(this.navigationListener)
+  }
+
+  private stopListeningForNavigation(): void {
+    if (this.navigationListener === null) {
+      return
+    }
+
+    chrome.webNavigation.onBeforeNavigate.removeListener(this.navigationListener)
+    chrome.webNavigation.onCommitted.removeListener(this.navigationListener)
+    chrome.webNavigation.onHistoryStateUpdated.removeListener(this.navigationListener)
+    chrome.webNavigation.onReferenceFragmentUpdated.removeListener(this.navigationListener)
+    this.navigationListener = null
+  }
+
+  /** True while the webNavigation listeners are registered. Readable for diagnostics. */
+  isListeningForNavigation(): boolean {
+    return this.navigationListener !== null
   }
 
   async captureVisit(item: chrome.history.HistoryItem): Promise<boolean> {
@@ -247,13 +433,25 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     return this.configured && this.config.enabled
   }
 
-  /** The identifier belongs to rex-core; an empty or absent one means the participant has none yet. */
-  async hasIdentifier(): Promise<boolean> {
-    return new Promise((resolve) => {
-      rexCorePlugin.handleMessage({ messageType: 'getIdentifier' }, null, (response) => {
-        resolve(typeof response === 'string' && response !== '')
-      })
-    })
+  /**
+   * `triggerBrowsingDrain` emits any stored records now and responds with the
+   * count, so a host extension can drain on its own cadence rather than waiting
+   * for the alarm.
+   */
+  override handleMessage(
+    message: { messageType?: string, event?: unknown } | undefined,
+    _sender: unknown,
+    sendResponse: (response: unknown) => void
+  ): boolean {
+    if (message?.messageType !== 'triggerBrowsingDrain') {
+      return false
+    }
+
+    this.drain()
+      .then((count) => sendResponse(count))
+      .catch(() => sendResponse(0))
+
+    return true
   }
 
   async drain(): Promise<number> {
@@ -426,25 +624,17 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
   }
 
-  /**
-   * `triggerBrowsingDrain` emits any stored records now and responds with the
-   * count, so a host extension can drain on its own cadence rather than waiting
-   * for the alarm.
-   */
-  override handleMessage(
-    message: { messageType?: string, event?: unknown } | undefined,
-    _sender: unknown,
-    sendResponse: (response: unknown) => void
-  ): boolean {
-    if (message?.messageType !== 'triggerBrowsingDrain') {
-      return false
-    }
+  /** The identifier belongs to rex-core; an empty or absent one means the participant has none yet. */
+  private async hasIdentifier(): Promise<boolean> {
+    return new Promise((resolve) => {
+      rexCorePlugin.handleMessage({ messageType: 'getIdentifier' }, null, (response) => {
+        resolve(typeof response === 'string' && response !== '')
+      })
+    })
+  }
 
-    this.drain()
-      .then((count) => sendResponse(count))
-      .catch(() => sendResponse(0))
-
-    return true
+  currentConfig(): BrowsingConfig {
+    return this.config
   }
 
   /**
@@ -472,196 +662,6 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
    */
   simulateDrainInterrupted(value: boolean): void {
     this.draining = value
-  }
-
-  /**
-   * Assigns configuration. Synchronous on purpose: a test, a host, or another
-   * module can hand this module its settings directly, with no server round trip
-   * and nothing to fake. Anything asynchronous a change implies is the caller's,
-   * immediately after — see reconcileStore.
-   */
-  updateConfiguration(section: Partial<BrowsingConfig> | undefined): void {
-    this.config = { ...DEFAULT_CONFIG, ...(section ?? {}) }
-    this.configured = true
-
-    // Listening follows the enabled flag: a disabled module holds no listener at
-    // all, rather than holding one that declines to act. Both calls are
-    // synchronous, so this stays inside updateConfiguration.
-    if (this.config.enabled) {
-      this.startListening()
-    } else {
-      this.stopListening()
-    }
-
-    if (this.config.enabled && (this.config.tab_opener_edges || this.internalPages.isWanted())) {
-      this.startListeningForTabs()
-    } else {
-      this.stopListeningForTabs()
-    }
-
-    if (this.config.enabled && this.config.tab_link_tolerance_ms > 0) {
-      this.startListeningForNavigation()
-    } else {
-      this.stopListeningForNavigation()
-    }
-  }
-
-  /** True while a history listener is registered. Readable for diagnostics. */
-  isListening(): boolean {
-    return this.historyListener !== null
-  }
-
-  /** True while the tabs listeners are registered. Readable for diagnostics. */
-  isListeningForTabs(): boolean {
-    return this.tabListeners !== null
-  }
-
-  /** True while the webNavigation listeners are registered. Readable for diagnostics. */
-  isListeningForNavigation(): boolean {
-    return this.navigationListener !== null
-  }
-
-  private startListeningForNavigation(): void {
-    if (this.navigationListener !== null || typeof chrome.webNavigation?.onCommitted?.addListener !== 'function') {
-      return
-    }
-
-    this.navigationListener = (details) => {
-      this.captureNavigation(details).catch((error) => {
-        console.error('[rex-browsing] Navigation capture failed:', error)
-      })
-    }
-
-    chrome.webNavigation.onBeforeNavigate.addListener(this.navigationListener)
-    chrome.webNavigation.onCommitted.addListener(this.navigationListener)
-    chrome.webNavigation.onHistoryStateUpdated.addListener(this.navigationListener)
-    chrome.webNavigation.onReferenceFragmentUpdated.addListener(this.navigationListener)
-  }
-
-  private stopListeningForNavigation(): void {
-    if (this.navigationListener === null) {
-      return
-    }
-
-    chrome.webNavigation.onBeforeNavigate.removeListener(this.navigationListener)
-    chrome.webNavigation.onCommitted.removeListener(this.navigationListener)
-    chrome.webNavigation.onHistoryStateUpdated.removeListener(this.navigationListener)
-    chrome.webNavigation.onReferenceFragmentUpdated.removeListener(this.navigationListener)
-    this.navigationListener = null
-  }
-
-  private startListeningForTabs(): void {
-    if (this.tabListeners !== null || typeof chrome.tabs?.onCreated?.addListener !== 'function') {
-      return
-    }
-
-    this.tabListeners = {
-      created: (tab) => {
-        if (this.config.tab_opener_edges) {
-          this.tabOpeners.tabCreated(tab)
-        }
-      },
-      updated: (tabId, changeInfo) => {
-        // onUpdated fires for every status change of every tab; only a committed
-        // URL is of interest, for a tab this module is holding or a page Chrome
-        // keeps out of history.
-        if (changeInfo.url === undefined) {
-          return
-        }
-
-        this.tabOpeners.tabNavigated(tabId, changeInfo.url).catch((error) => {
-          console.error('[rex-browsing] Opener capture failed:', error)
-        })
-
-        this.captureInternalPage(tabId, changeInfo.url).catch((error) => {
-          console.error('[rex-browsing] Internal page capture failed:', error)
-        })
-      },
-      removed: (tabId) => {
-        this.tabOpeners.tabRemoved(tabId)
-      }
-    }
-
-    chrome.tabs.onCreated.addListener(this.tabListeners.created)
-    chrome.tabs.onUpdated.addListener(this.tabListeners.updated)
-    chrome.tabs.onRemoved.addListener(this.tabListeners.removed)
-  }
-
-  private stopListeningForTabs(): void {
-    if (this.tabListeners === null) {
-      return
-    }
-
-    chrome.tabs.onCreated.removeListener(this.tabListeners.created)
-    chrome.tabs.onUpdated.removeListener(this.tabListeners.updated)
-    chrome.tabs.onRemoved.removeListener(this.tabListeners.removed)
-    this.tabListeners = null
-    this.tabOpeners.forgetAll()
-  }
-
-  private startListening(): void {
-    if (this.historyListener !== null) {
-      return
-    }
-
-    this.historyListener = (item: chrome.history.HistoryItem) => {
-      this.captureVisit(item).catch((error) => {
-        console.error('[rex-browsing] Capture failed:', error)
-      })
-    }
-
-    chrome.history.onVisited.addListener(this.historyListener)
-  }
-
-  private stopListening(): void {
-    if (this.historyListener === null) {
-      return
-    }
-
-    chrome.history.onVisited.removeListener(this.historyListener)
-    this.historyListener = null
-  }
-
-  /** Discard what is already stored when the configuration now in force disables the module. */
-  async reconcileStore(): Promise<void> {
-    if (!this.config.enabled) {
-      const discarded = await this.visitStore.clear() + await this.openerStore.clear()
-        + await this.pageStore.clear()
-      await this.tabLinker.clear()
-
-      if (discarded > 0) {
-        console.log(`[rex-browsing] Disabled; discarded ${discarded} stored record(s).`)
-      }
-    }
-  }
-
-  /** Resolves once rex-core has a stored configuration; never resolves if none arrives before the timeout. */
-  private waitForConfiguration(): Promise<Record<string, unknown>> {
-    return new Promise((resolve) => {
-      rexCorePlugin.handleMessage({
-        messageType: 'waitForConfiguration',
-        event: { timeout: CONFIGURATION_TIMEOUT_MS }
-      }, null, resolve)
-    })
-  }
-
-  /** rex-core's activation hook: wait for configuration, then hand this module's own section over. */
-  async refreshConfiguration(): Promise<void> {
-    try {
-      const all = await this.waitForConfiguration()
-
-      this.updateConfiguration(all['browsing'] as Partial<BrowsingConfig> | undefined)
-
-      await this.reconcileStore()
-    } catch (error) {
-      console.error('[rex-browsing] Failed to load configuration:', error)
-    }
-  }
-
-  async setup(): Promise<void> {
-    console.log('[rex-browsing/service-worker] Setting up browsing capture')
-
-    await this.refreshConfiguration()
   }
 }
 
