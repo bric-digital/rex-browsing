@@ -1813,6 +1813,43 @@ test.describe('rex-browsing — real extension', () => {
 
       expect(remaining).toBe(0)
     })
+
+    test('a disabled module holds nothing even if the opener entries are called directly', async () => {
+      const result = await serviceWorker.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (self as any).rexBrowsingPlugin
+        const url = 'https://www.example.com/opened'
+        const real = chrome.history.getVisits
+        chrome.history.getVisits = async () => ([
+          { id: '1', visitId: '88', referringVisitId: '0', visitTime: Date.now(), transition: 'link', isLocal: true }
+        ]) as never
+
+        async function captureBoth(tabId: number) {
+          const reserved = p.captureOpenerTab({ id: tabId, openerTabId: 1 })
+          const held = p.tabOpeners.pending.has(tabId)
+          p.tabOpeners.pending.set(tabId, { openerVisitId: Promise.resolve('3'), createdAtMs: Date.now() })
+          const stored = await p.captureOpenerNavigation(tabId, url)
+          const openers = (await p.openerStore.readAll()).length
+          p.tabOpeners.forgetAll()
+          await p.openerStore.clear()
+          return { reserved, held, stored, openers }
+        }
+
+        try {
+          p.updateConfiguration({ enabled: true })
+          const whenEnabled = await captureBoth(515151)
+          p.updateConfiguration({ enabled: false })
+          const whenDisabled = await captureBoth(515152)
+          return { whenEnabled, whenDisabled }
+        } finally {
+          chrome.history.getVisits = real
+          p.updateConfiguration({})
+        }
+      })
+
+      expect(result.whenEnabled).toEqual({ reserved: true, held: true, stored: true, openers: 1 })
+      expect(result.whenDisabled).toEqual({ reserved: false, held: false, stored: false, openers: 0 })
+    })
   })
 
   // -------------------------------------------------------------------------

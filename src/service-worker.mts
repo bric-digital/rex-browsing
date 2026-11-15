@@ -304,9 +304,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
     this.openerAndPageListeners = {
       created: (tab) => {
-        if (this.config.tab_opener_edges) {
-          this.tabOpeners.tabCreated(tab)
-        }
+        this.captureOpenerTab(tab)
       },
       updated: (tabId, changeInfo) => {
         // onUpdated fires for every status change of every tab; only a committed
@@ -316,7 +314,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
           return
         }
 
-        this.tabOpeners.tabNavigated(tabId, changeInfo.url).catch((error) => {
+        this.captureOpenerNavigation(tabId, changeInfo.url).catch((error) => {
           console.error('[rex-browsing] Opener capture failed:', error)
         })
 
@@ -431,6 +429,22 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     const ceiling = this.config.max_visits_per_url
 
     return ceiling > 0 && visitCount !== undefined && visitCount > ceiling
+  }
+
+  captureOpenerTab(tab: chrome.tabs.Tab): boolean {
+    if (!this.isCaptureEnabled() || !this.config.tab_opener_edges) {
+      return false
+    }
+
+    return this.tabOpeners.tabCreated(tab)
+  }
+
+  async captureOpenerNavigation(tabId: number, url: string): Promise<boolean> {
+    if (!this.isCaptureEnabled()) {
+      return false
+    }
+
+    return this.tabOpeners.tabNavigated(tabId, url)
   }
 
   /** A tab committed a URL Chrome may keep out of history. */
