@@ -393,7 +393,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       return false
     }
 
-    const record = await this.recordVisit(item.url, item.title ?? '', item.lastVisitTime, item.visitCount)
+    const record = await this.recordVisit(item, item.url)
 
     // The visit is stored at this point, so a link failure is not a capture failure.
     try {
@@ -410,15 +410,15 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
    * rather than a duplicate. A visit whose ids cannot be had is still recorded.
    * `visitCount` already includes the visit being recorded.
    */
-  private async recordVisit(url: string, title: string, lastVisitTime: number | undefined,
-    visitCount: number | undefined): Promise<VisitRecord> {
-    const visitTime = lastVisitTime ?? Date.now()
+  private async recordVisit(item: chrome.history.HistoryItem, url: string): Promise<VisitRecord> {
+    const title = item.title ?? ''
+    const visitTime = item.lastVisitTime ?? Date.now()
 
-    if (this.isOverCeiling(visitCount)) {
+    if (this.isOverCeiling(item.visitCount)) {
       return this.visitStore.recordWithoutIds(url, title, visitTime, 'over_ceiling', this.config.max_visits_per_url)
     }
 
-    const visit = await newestVisit(url, lastVisitTime)
+    const visit = await newestVisit(url, item.lastVisitTime)
 
     if (visit === null) {
       return this.visitStore.recordWithoutIds(url, title, visitTime, 'lookup_failed')
