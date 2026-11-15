@@ -107,7 +107,7 @@ test.describe('rex-browsing — real extension', () => {
       }
       return {
         records: (await p.visitStore.readAll()).length,
-        listening: p.isListening()
+        listening: p.isListeningForVisits()
       }
     })
 
@@ -482,7 +482,7 @@ test.describe('rex-browsing — real extension', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         events: (self as any).__capturedEvents.filter((e: any) => e.name === 'rex-browsing-visit'),
         stored: (await p.visitStore.readAll()).length,
-        listening: p.isListening()
+        listening: p.isListeningForVisits()
       }
     })
 
@@ -529,7 +529,7 @@ test.describe('rex-browsing — real extension', () => {
 
       const refreshed = p.refreshConfiguration()
       await new Promise((resolve) => setTimeout(resolve, 600))
-      const listeningBefore = p.isListening()
+      const listeningBefore = p.isListeningForVisits()
 
       await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
       await refreshed
@@ -545,7 +545,7 @@ test.describe('rex-browsing — real extension', () => {
         chrome.history.getVisits = real
       }
 
-      return { listeningBefore, listeningAfter: p.isListening(), captured }
+      return { listeningBefore, listeningAfter: p.isListeningForVisits(), captured }
     })
 
     expect(result).toEqual({ listeningBefore: false, listeningAfter: true, captured: true })
@@ -763,16 +763,16 @@ test.describe('rex-browsing — real extension', () => {
 
       await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
       await p.refreshConfiguration()
-      const whenEnabled = p.isListening()
+      const whenEnabled = p.isListeningForVisits()
 
       await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: false } } })
       await p.refreshConfiguration()
-      const whenDisabled = p.isListening()
+      const whenDisabled = p.isListeningForVisits()
 
       // And it comes back, rather than being a one-way door.
       await chrome.storage.local.set({ REXConfiguration: { browsing: { enabled: true } } })
       await p.refreshConfiguration()
-      const whenReEnabled = p.isListening()
+      const whenReEnabled = p.isListeningForVisits()
 
       return { whenEnabled, whenDisabled, whenReEnabled }
     })
@@ -792,10 +792,10 @@ test.describe('rex-browsing — real extension', () => {
       p.simulateBeforeConfiguration()
 
       const promise = p.setup()
-      const duringSetup = p.isListening()
+      const duringSetup = p.isListeningForVisits()
       await promise
 
-      return { duringSetup, afterSetup: p.isListening() }
+      return { duringSetup, afterSetup: p.isListeningForVisits() }
     })
 
     expect(listening).toEqual({ duringSetup: false, afterSetup: true })
@@ -1450,7 +1450,7 @@ test.describe('rex-browsing — real extension', () => {
         const p = (self as any).rexBrowsingPlugin
         return configs.map((config) => {
           p.updateConfiguration(config)
-          return p.isListeningForNavigation()
+          return p.isListeningForTabFields()
         })
       }, [
         { enabled: true, tab_link_tolerance_ms: 5000 },
@@ -1780,13 +1780,13 @@ test.describe('rex-browsing — real extension', () => {
       const listening = await serviceWorker.evaluate(() => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
-        const whenOff = p.isListeningForTabs()
+        const whenOff = p.isListeningForOpenersAndPages()
         p.updateConfiguration({ enabled: true, tab_opener_edges: true })
-        const whenOn = p.isListeningForTabs()
+        const whenOn = p.isListeningForOpenersAndPages()
         p.updateConfiguration({ enabled: false })
-        const whenDisabled = p.isListeningForTabs()
+        const whenDisabled = p.isListeningForOpenersAndPages()
         p.updateConfiguration({ enabled: true })
-        return { whenOff, whenOn, whenDisabled, byDefault: p.isListeningForTabs() }
+        return { whenOff, whenOn, whenDisabled, byDefault: p.isListeningForOpenersAndPages() }
       })
 
       expect(listening.whenOff).toBe(false)
@@ -1941,16 +1941,16 @@ test.describe('rex-browsing — real extension', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = (self as any).rexBrowsingPlugin
         p.updateConfiguration({ enabled: true, tab_opener_edges: false })
-        const withNeither = p.isListeningForTabs()
+        const withNeither = p.isListeningForOpenersAndPages()
         p.updateConfiguration({ enabled: true, tab_opener_edges: false, internal_pages: true })
-        const withPages = p.isListeningForTabs()
+        const withPages = p.isListeningForOpenersAndPages()
         // A new tab with an opener would start an opener lookup if this
         // listener still served opener edges.
-        p.tabListeners.created({ id: 424242, openerTabId: 1 })
+        p.openerAndPageListeners.created({ id: 424242, openerTabId: 1 })
         const reserved = p.tabOpeners.pending.has(424242)
         p.tabOpeners.forgetAll()
         p.updateConfiguration({ enabled: false, internal_pages: true })
-        const whenDisabled = p.isListeningForTabs()
+        const whenDisabled = p.isListeningForOpenersAndPages()
         return { withNeither, withPages, reserved, whenDisabled }
       })
 

@@ -142,15 +142,15 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   private configured = false
 
   /** Held so it can be removed again; a listener is only removable by reference. */
-  private historyListener: ((item: chrome.history.HistoryItem) => void) | null = null
+  private visitListener: ((item: chrome.history.HistoryItem) => void) | null = null
 
-  private tabListeners: {
+  private openerAndPageListeners: {
     created: (tab: chrome.tabs.Tab) => void;
     updated: (tabId: number, changeInfo: { url?: string }) => void;
     removed: (tabId: number) => void;
   } | null = null
 
-  private navigationListener: ((details: { tabId: number; url: string; frameId: number; timeStamp: number }) => void) | null = null
+  private tabFieldListener: ((details: { tabId: number; url: string; frameId: number; timeStamp: number }) => void) | null = null
 
   moduleName(): string {
     return 'rex-browsing'
@@ -231,21 +231,21 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     // all, rather than holding one that declines to act. Both calls are
     // synchronous, so this stays inside updateConfiguration.
     if (this.config.enabled) {
-      this.startListening()
+      this.startListeningForVisits()
     } else {
-      this.stopListening()
+      this.stopListeningForVisits()
     }
 
     if (this.config.enabled && (this.config.tab_opener_edges || this.internalPages.isWanted())) {
-      this.startListeningForTabs()
+      this.startListeningForOpenersAndPages()
     } else {
-      this.stopListeningForTabs()
+      this.stopListeningForOpenersAndPages()
     }
 
     if (this.config.enabled && this.config.tab_link_tolerance_ms > 0) {
-      this.startListeningForNavigation()
+      this.startListeningForTabFields()
     } else {
-      this.stopListeningForNavigation()
+      this.stopListeningForTabFields()
     }
   }
 
@@ -262,40 +262,40 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     }
   }
 
-  private startListening(): void {
-    if (this.historyListener !== null) {
+  private startListeningForVisits(): void {
+    if (this.visitListener !== null) {
       return
     }
 
-    this.historyListener = (item: chrome.history.HistoryItem) => {
+    this.visitListener = (item: chrome.history.HistoryItem) => {
       this.captureVisit(item).catch((error) => {
         console.error('[rex-browsing] Capture failed:', error)
       })
     }
 
-    chrome.history.onVisited.addListener(this.historyListener)
+    chrome.history.onVisited.addListener(this.visitListener)
   }
 
-  private stopListening(): void {
-    if (this.historyListener === null) {
+  private stopListeningForVisits(): void {
+    if (this.visitListener === null) {
       return
     }
 
-    chrome.history.onVisited.removeListener(this.historyListener)
-    this.historyListener = null
+    chrome.history.onVisited.removeListener(this.visitListener)
+    this.visitListener = null
   }
 
   /** True while a history listener is registered. Readable for diagnostics. */
-  isListening(): boolean {
-    return this.historyListener !== null
+  isListeningForVisits(): boolean {
+    return this.visitListener !== null
   }
 
-  private startListeningForTabs(): void {
-    if (this.tabListeners !== null || typeof chrome.tabs?.onCreated?.addListener !== 'function') {
+  private startListeningForOpenersAndPages(): void {
+    if (this.openerAndPageListeners !== null || typeof chrome.tabs?.onCreated?.addListener !== 'function') {
       return
     }
 
-    this.tabListeners = {
+    this.openerAndPageListeners = {
       created: (tab) => {
         if (this.config.tab_opener_edges) {
           this.tabOpeners.tabCreated(tab)
@@ -322,60 +322,60 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       }
     }
 
-    chrome.tabs.onCreated.addListener(this.tabListeners.created)
-    chrome.tabs.onUpdated.addListener(this.tabListeners.updated)
-    chrome.tabs.onRemoved.addListener(this.tabListeners.removed)
+    chrome.tabs.onCreated.addListener(this.openerAndPageListeners.created)
+    chrome.tabs.onUpdated.addListener(this.openerAndPageListeners.updated)
+    chrome.tabs.onRemoved.addListener(this.openerAndPageListeners.removed)
   }
 
-  private stopListeningForTabs(): void {
-    if (this.tabListeners === null) {
+  private stopListeningForOpenersAndPages(): void {
+    if (this.openerAndPageListeners === null) {
       return
     }
 
-    chrome.tabs.onCreated.removeListener(this.tabListeners.created)
-    chrome.tabs.onUpdated.removeListener(this.tabListeners.updated)
-    chrome.tabs.onRemoved.removeListener(this.tabListeners.removed)
-    this.tabListeners = null
+    chrome.tabs.onCreated.removeListener(this.openerAndPageListeners.created)
+    chrome.tabs.onUpdated.removeListener(this.openerAndPageListeners.updated)
+    chrome.tabs.onRemoved.removeListener(this.openerAndPageListeners.removed)
+    this.openerAndPageListeners = null
     this.tabOpeners.forgetAll()
   }
 
   /** True while the tabs listeners are registered. Readable for diagnostics. */
-  isListeningForTabs(): boolean {
-    return this.tabListeners !== null
+  isListeningForOpenersAndPages(): boolean {
+    return this.openerAndPageListeners !== null
   }
 
-  private startListeningForNavigation(): void {
-    if (this.navigationListener !== null || typeof chrome.webNavigation?.onCommitted?.addListener !== 'function') {
+  private startListeningForTabFields(): void {
+    if (this.tabFieldListener !== null || typeof chrome.webNavigation?.onCommitted?.addListener !== 'function') {
       return
     }
 
-    this.navigationListener = (details) => {
+    this.tabFieldListener = (details) => {
       this.captureNavigation(details).catch((error) => {
         console.error('[rex-browsing] Navigation capture failed:', error)
       })
     }
 
-    chrome.webNavigation.onBeforeNavigate.addListener(this.navigationListener)
-    chrome.webNavigation.onCommitted.addListener(this.navigationListener)
-    chrome.webNavigation.onHistoryStateUpdated.addListener(this.navigationListener)
-    chrome.webNavigation.onReferenceFragmentUpdated.addListener(this.navigationListener)
+    chrome.webNavigation.onBeforeNavigate.addListener(this.tabFieldListener)
+    chrome.webNavigation.onCommitted.addListener(this.tabFieldListener)
+    chrome.webNavigation.onHistoryStateUpdated.addListener(this.tabFieldListener)
+    chrome.webNavigation.onReferenceFragmentUpdated.addListener(this.tabFieldListener)
   }
 
-  private stopListeningForNavigation(): void {
-    if (this.navigationListener === null) {
+  private stopListeningForTabFields(): void {
+    if (this.tabFieldListener === null) {
       return
     }
 
-    chrome.webNavigation.onBeforeNavigate.removeListener(this.navigationListener)
-    chrome.webNavigation.onCommitted.removeListener(this.navigationListener)
-    chrome.webNavigation.onHistoryStateUpdated.removeListener(this.navigationListener)
-    chrome.webNavigation.onReferenceFragmentUpdated.removeListener(this.navigationListener)
-    this.navigationListener = null
+    chrome.webNavigation.onBeforeNavigate.removeListener(this.tabFieldListener)
+    chrome.webNavigation.onCommitted.removeListener(this.tabFieldListener)
+    chrome.webNavigation.onHistoryStateUpdated.removeListener(this.tabFieldListener)
+    chrome.webNavigation.onReferenceFragmentUpdated.removeListener(this.tabFieldListener)
+    this.tabFieldListener = null
   }
 
   /** True while the webNavigation listeners are registered. Readable for diagnostics. */
-  isListeningForNavigation(): boolean {
-    return this.navigationListener !== null
+  isListeningForTabFields(): boolean {
+    return this.tabFieldListener !== null
   }
 
   async captureVisit(item: chrome.history.HistoryItem): Promise<boolean> {
@@ -684,9 +684,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   simulateBeforeConfiguration(): void {
     this.configured = false
     this.config = DEFAULT_CONFIG
-    this.stopListening()
-    this.stopListeningForTabs()
-    this.stopListeningForNavigation()
+    this.stopListeningForVisits()
+    this.stopListeningForOpenersAndPages()
+    this.stopListeningForTabFields()
   }
 
   /**
