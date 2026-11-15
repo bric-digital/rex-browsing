@@ -7,7 +7,7 @@
  */
 
 import type { BrowsingVisit } from './visit-lookup.mts'
-import { EdgeStore, type StoredRecord } from './edge-store.mjs'
+import { RecordStore, type StoredRecord } from './record-store.mjs'
 
 const KEY_PREFIX = 'rexBrowsingVisit:'
 
@@ -72,7 +72,7 @@ export function storageIdOf(record: VisitRecord): string {
     : `nid:${record.visit_time}:${urlHash(record.url)}`
 }
 
-export class VisitStore extends EdgeStore<VisitRecord> {
+export class VisitStore extends RecordStore<VisitRecord> {
   constructor() {
     super(KEY_PREFIX, storageIdOf)
   }

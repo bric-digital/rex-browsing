@@ -18,7 +18,7 @@ export interface StoredEdge extends StoredRecord {
   visit_id: string;
 }
 
-export class EdgeStore<T extends StoredRecord> {
+export class RecordStore<T extends StoredRecord> {
   constructor(private readonly prefix: string, private readonly idOf: (record: T) => string) {}
 
   async put(record: T): Promise<void> {

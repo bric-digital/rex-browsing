@@ -11,7 +11,7 @@
  * participant typed, such as `chrome://history/?q=`.
  */
 
-import { EdgeStore, type StoredRecord } from './edge-store.mjs'
+import { RecordStore, type StoredRecord } from './record-store.mjs'
 
 const KEY_PREFIX = 'rexBrowsingPage:'
 
@@ -24,7 +24,7 @@ export interface PageRecord extends StoredRecord {
   url: string;
 }
 
-export class PageStore extends EdgeStore<PageRecord> {
+export class PageStore extends RecordStore<PageRecord> {
   constructor() {
     super(KEY_PREFIX, (record) => record.page_id)
   }

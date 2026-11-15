@@ -124,7 +124,7 @@ Example:
 | `visit-store.mts` | Holds recorded visits until they can be emitted |
 | `history-item.mts` | Reads the history-item fields and computes `domain` |
 | `tab-link.mts` | Links visits to tabs from webNavigation events |
-| `edge-store.mts` | One key per record in `chrome.storage.local`, under a prefix per kind of record |
+| `record-store.mts` | One key per record in `chrome.storage.local`, under a prefix per kind of record |
 | `tab-opener.mts` | Attributes a new tab's first visit to the page that opened it |
 | `internal-pages.mts` | Records the browser's own pages from `chrome.tabs` |
 

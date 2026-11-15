@@ -19,7 +19,7 @@
  * edge for the same visit can both be held.
  */
 
-import { EdgeStore, type StoredEdge } from './edge-store.mjs'
+import { RecordStore, type StoredEdge } from './record-store.mjs'
 import type { IdentifiedVisitRecord, VisitRecord } from './visit-store.mjs'
 import { isRecordedScheme, newestVisit, visitCount } from './visit-lookup.mjs'
 
@@ -47,7 +47,7 @@ interface PendingOpener {
   createdAt: number;
 }
 
-export class OpenerStore extends EdgeStore<OpenerRecord> {
+export class OpenerStore extends RecordStore<OpenerRecord> {
   constructor() {
     super(KEY_PREFIX, (record) => record.visit_id)
   }
