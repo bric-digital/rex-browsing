@@ -888,6 +888,37 @@ test.describe('rex-browsing — real extension', () => {
       return `${Date.now()}-${Math.random().toString(36).slice(2)}`
     }
 
+    async function visitWhileConfigurationIsUnread(url: string, section: { enabled: boolean }) {
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.simulateBeforeConfiguration()
+      })
+      await visit(url)
+      await serviceWorker.evaluate((configuration) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ ...configuration, tab_link_tolerance_ms: 500 })
+      }, section)
+    }
+
+    test('a visit made while a woken worker is still reading configuration is recorded once it arrives', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitWhileConfigurationIsUnread(visitedUrl, { enabled: true })
+
+      await expect.poll(async () => (await drainVisits()).filter((e) => e.url === visitedUrl).length, { timeout: 10_000 }).toBe(1)
+    })
+
+    test('a visit made before configuration arrives is dropped when the module turns out to be disabled', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitWhileConfigurationIsUnread(visitedUrl, { enabled: false })
+      await serviceWorker.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
+      })
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+
+      expect((await drainVisits()).filter((e) => e.url === visitedUrl)).toHaveLength(0)
+    })
+
     test('records an ordinary visit as rex-browsing-visit with the history-visit fields', async () => {
       const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
       await visit(visitedUrl)
