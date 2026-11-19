@@ -60,7 +60,7 @@ Such a record has `url`, `domain`, `title`, `visit_time` and `date`, plus tab fi
 
 ### `rex-browsing-visit-ceiling-exceeded`
 
-At each drain, one `pdk-app-event` per address that was recorded over the ceiling in that drain, with `event_name` `rex-browsing-visit-ceiling-exceeded` and `event_details`: `domain`, `visit_count` (Chrome's count for the address, absent when Chrome holds no history item for it), `ceiling` (the one in force when the earliest of those visits was recorded), `visits_in_drain` and `date`. It tells the researcher a participant's profile has an abnormally revisited page, usually one that refreshes itself.
+At each drain, one `pdk-app-event` per address that was recorded over the ceiling in that drain, with `event_name` `rex-browsing-visit-ceiling-exceeded` and `event_details`: `url` (the full address), `domain`, `visit_count` (Chrome's count for the address, absent when Chrome holds no history item for it), `ceiling` (the one in force when the earliest of those visits was recorded), `visits_in_drain` and `date`. It tells the researcher a participant's profile has an abnormally revisited page, usually one that refreshes itself.
 
 ### `rex-browsing-opener`
 

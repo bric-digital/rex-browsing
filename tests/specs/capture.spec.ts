@@ -1135,6 +1135,7 @@ test.describe('rex-browsing — real extension', () => {
 
       expect(heavy).toHaveLength(3)
       expect(ceilingEvents).toHaveLength(1)
+      expect(ceilingEvents[0].event_details.url).toBe(heavyUrl)
       expect(ceilingEvents[0].event_details.domain).toBe('example.com')
       expect(ceilingEvents[0].event_details.ceiling).toBe(1)
       expect(ceilingEvents[0].event_details.visits_in_drain).toBe(3)

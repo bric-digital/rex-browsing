@@ -627,6 +627,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         name: 'pdk-app-event',
         event_name: 'rex-browsing-visit-ceiling-exceeded',
         event_details: {
+          url,
           domain: registeredDomain(url),
           ...(item?.visit_count === undefined ? {} : { visit_count: item.visit_count }),
           ...(over.ceiling === undefined ? {} : { ceiling: over.ceiling }),
