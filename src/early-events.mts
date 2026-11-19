@@ -36,7 +36,13 @@ export class EarlyEventBuffer {
 
   private readonly onVisited: VisitListener = (item) => this.hold({ kind: 'visit', item })
 
-  private readonly onNavigation: NavigationListener = (details) => this.hold({ kind: 'navigation', details })
+  private navigationRegistered = false
+
+  private readonly onNavigation: NavigationListener = (details) => {
+    if (this.listening) {
+      this.hold({ kind: 'navigation', details })
+    }
+  }
 
   private readonly onTabCreated: TabCreatedListener = (tab) => this.hold({ kind: 'tabCreated', tab })
 
@@ -51,7 +57,7 @@ export class EarlyEventBuffer {
     chrome.history?.onVisited?.addListener(this.onVisited)
     chrome.tabs?.onCreated?.addListener(this.onTabCreated)
     chrome.tabs?.onUpdated?.addListener(this.onTabUpdated)
-    this.navigationEvents().forEach((event) => event?.addListener(this.onNavigation))
+    this.registerNavigationListeners()
   }
 
   release(targets: EarlyEventTargets): void {
@@ -80,18 +86,18 @@ export class EarlyEventBuffer {
     chrome.history?.onVisited?.removeListener(this.onVisited)
     chrome.tabs?.onCreated?.removeListener(this.onTabCreated)
     chrome.tabs?.onUpdated?.removeListener(this.onTabUpdated)
-    this.navigationEvents().forEach((event) => event?.removeListener(this.onNavigation))
   }
 
-  private navigationEvents(): Array<chrome.events.Event<NavigationListener> | undefined> {
-    const navigation = chrome.webNavigation as unknown as Record<string, chrome.events.Event<NavigationListener>> | undefined
+  private registerNavigationListeners(): void {
+    if (this.navigationRegistered) {
+      return
+    }
 
-    return [
-      navigation?.onBeforeNavigate,
-      navigation?.onCommitted,
-      navigation?.onHistoryStateUpdated,
-      navigation?.onReferenceFragmentUpdated
-    ]
+    this.navigationRegistered = true
+    chrome.webNavigation?.onBeforeNavigate?.addListener(this.onNavigation)
+    chrome.webNavigation?.onCommitted?.addListener(this.onNavigation)
+    chrome.webNavigation?.onHistoryStateUpdated?.addListener(this.onNavigation)
+    chrome.webNavigation?.onReferenceFragmentUpdated?.addListener(this.onNavigation)
   }
 
   private hold(event: HeldEvent): void {

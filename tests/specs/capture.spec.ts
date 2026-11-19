@@ -888,15 +888,21 @@ test.describe('rex-browsing — real extension', () => {
       return `${Date.now()}-${Math.random().toString(36).slice(2)}`
     }
 
+    type WorkerWithPlugin = typeof self & {
+      rexBrowsingPlugin: {
+        simulateBeforeConfiguration(): void
+        updateConfiguration(configuration: Record<string, unknown>): void
+        earlyEvents: { heldCount(): number }
+      }
+    }
+
     async function visitWhileConfigurationIsUnread(url: string, section: { enabled: boolean }) {
       await serviceWorker.evaluate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.simulateBeforeConfiguration()
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.simulateBeforeConfiguration()
       })
       await visit(url)
       await serviceWorker.evaluate((configuration) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ ...configuration, tab_link_tolerance_ms: 500 })
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.updateConfiguration({ ...configuration, tab_link_tolerance_ms: 500 })
       }, section)
     }
 
@@ -911,12 +917,19 @@ test.describe('rex-browsing — real extension', () => {
       const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
       await visitWhileConfigurationIsUnread(visitedUrl, { enabled: false })
       await serviceWorker.evaluate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
       })
       await new Promise((resolve) => setTimeout(resolve, 2000))
 
       expect((await drainVisits()).filter((e) => e.url === visitedUrl)).toHaveLength(0)
+    })
+
+    test('a navigation after configuration has arrived is not held by the early listeners', async () => {
+      await visit(`${ORIGIN}/plain?marker=${marker()}`)
+
+      const held = await serviceWorker.evaluate(() => (self as WorkerWithPlugin).rexBrowsingPlugin.earlyEvents.heldCount())
+
+      expect(held).toBe(0)
     })
 
     test('records an ordinary visit as rex-browsing-visit with the history-visit fields', async () => {
