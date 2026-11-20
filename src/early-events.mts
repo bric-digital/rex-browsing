@@ -39,14 +39,18 @@ export class EarlyEventBuffer {
   private navigationRegistered = false
 
   private readonly onNavigation: NavigationListener = (details) => {
-    if (this.listening) {
+    if (this.listening && details.frameId === 0) {
       this.hold({ kind: 'navigation', details })
     }
   }
 
   private readonly onTabCreated: TabCreatedListener = (tab) => this.hold({ kind: 'tabCreated', tab })
 
-  private readonly onTabUpdated: TabUpdatedListener = (tabId, changeInfo) => this.hold({ kind: 'tabUpdated', tabId, changeInfo })
+  private readonly onTabUpdated: TabUpdatedListener = (tabId, changeInfo) => {
+    if (changeInfo.url !== undefined) {
+      this.hold({ kind: 'tabUpdated', tabId, changeInfo })
+    }
+  }
 
   start(): void {
     if (this.listening) {

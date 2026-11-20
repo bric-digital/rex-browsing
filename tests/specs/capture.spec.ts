@@ -6,7 +6,7 @@
  * extensions and exposes their service workers, so no window opens.
  */
 
-import { test, expect, chromium, type BrowserContext, type Worker } from '@playwright/test'
+import { test, expect, chromium, type BrowserContext, type Page, type Worker } from '@playwright/test'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -892,7 +892,6 @@ test.describe('rex-browsing — real extension', () => {
       rexBrowsingPlugin: {
         simulateBeforeConfiguration(): void
         updateConfiguration(configuration: Record<string, unknown>): void
-        earlyEvents: { heldCount(): number }
       }
     }
 
@@ -924,12 +923,48 @@ test.describe('rex-browsing — real extension', () => {
       expect((await drainVisits()).filter((e) => e.url === visitedUrl)).toHaveLength(0)
     })
 
-    test('a navigation after configuration has arrived is not held by the early listeners', async () => {
-      await visit(`${ORIGIN}/plain?marker=${marker()}`)
+    const MORE_EVENTS_THAN_THE_BUFFER_HOLDS = 250
 
-      const held = await serviceWorker.evaluate(() => (self as WorkerWithPlugin).rexBrowsingPlugin.earlyEvents.heldCount())
+    async function visitThenBurstWhileConfigurationIsUnread(url: string, burst: (page: Page) => Promise<void>) {
+      await serviceWorker.evaluate(() => {
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.simulateBeforeConfiguration()
+      })
+      await visit(url)
 
-      expect(held).toBe(0)
+      const page = await context.newPage()
+      await page.goto(`${ORIGIN}/plain?burst=${marker()}`)
+      await burst(page)
+      await page.close()
+
+      await serviceWorker.evaluate(() => {
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
+      })
+    }
+
+    test('title changes while configuration is unread do not push the visit out of the held events', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitThenBurstWhileConfigurationIsUnread(visitedUrl, (page) => page.evaluate(async (count) => {
+        for (let index = 0; index < count; index++) {
+          document.title = `title ${index}`
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      }, MORE_EVENTS_THAN_THE_BUFFER_HOLDS))
+
+      await expect.poll(async () => (await drainVisits()).filter((e) => e.url === visitedUrl).length, { timeout: 10_000 }).toBe(1)
+    })
+
+    test('subframe navigations while configuration is unread do not push the visit out of the held events', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitThenBurstWhileConfigurationIsUnread(visitedUrl, (page) => page.evaluate(async (count) => {
+        for (let index = 0; index < count; index++) {
+          const frame = document.createElement('iframe')
+          frame.src = `/plain?frame=${index}`
+          document.body.append(frame)
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      }, MORE_EVENTS_THAN_THE_BUFFER_HOLDS))
+
+      await expect.poll(async () => (await drainVisits()).filter((e) => e.url === visitedUrl).length, { timeout: 10_000 }).toBe(1)
     })
 
     test('records an ordinary visit as rex-browsing-visit with the history-visit fields', async () => {
