@@ -155,7 +155,7 @@ Behavior changes:
 
 - The module is off by default. v2 defaulted `enabled` to `true`.
 - It records every http and https visit, not only redirect hops, in the `rex-history-visit` structure. v2 hop points carried only ids and a redacted address.
-- Nothing is recorded before configuration arrives. Visits are held until an identifier exists.
+- Nothing is recorded until configuration arrives, but a worker that Chrome stopped and then woke for a visit holds that visit and the navigation events around it, up to 200, and records them once configuration arrives if the module is enabled. Emission still waits for an identifier.
 - Records past `max_record_age_days` are discarded in every state.
 - New: tab link fields and `tab_link_tolerance_ms`.
 - New: `max_visits_per_url` (default `10000`), which bounds the visits recorded with ids per address. Above it, and when the lookup fails, visits are recorded without ids and carry `ids_unavailable`. Analysis that assumes every `rex-browsing-visit` has a `visit_id` must handle the absence.

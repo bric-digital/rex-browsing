@@ -28,6 +28,7 @@ import { historyItemFields, registeredDomain, type HistoryItemFields } from './h
 import { OpenerStore, TabOpenerTracker, chainRoot, type OpenerRecord } from './tab-opener.mjs'
 import { InternalPageRecorder, PageStore, type PageRecord } from './internal-pages.mjs'
 import { TabLinker, isEmittable } from './tab-link.mjs'
+import { EarlyEventBuffer } from './early-events.mjs'
 
 type HistoryCounts = 'last_visit_time' | 'visit_count' | 'typed_count'
 
@@ -143,6 +144,9 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   /** False until the first updateConfiguration; nothing is recorded before it. */
   private configured = false
 
+  /** Holds what happens while a woken worker reads configuration, for the listeners that start once it arrives. */
+  private readonly earlyEvents = new EarlyEventBuffer()
+
   /** Held so it can be removed again; a listener is only removable by reference. */
   private visitListener: ((item: chrome.history.HistoryItem) => void) | null = null
 
@@ -153,6 +157,11 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
   } | null = null
 
   private tabFieldListener: ((details: { tabId: number; url: string; frameId: number; timeStamp: number }) => void) | null = null
+
+  constructor() {
+    super()
+    this.earlyEvents.start()
+  }
 
   moduleName(): string {
     return 'rex-browsing'
@@ -168,7 +177,8 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       browsing: {
         enabled: 'Boolean, default false. True if module is active, false otherwise. When false nothing is '
           + 'captured, nothing is emitted even if a host asks, and anything already captured is discarded. '
-          + 'Visits that happen before configuration arrives are not recorded.',
+          + 'A visit that happens while a restarted worker is still reading configuration is held and, '
+          + 'if the module is enabled, recorded once configuration arrives.',
         tab_link_tolerance_ms: 'Number, default 5000. A visit is linked to the tab it happened in '
           + 'from a main-frame navigation to the same URL within this many milliseconds of the visit; '
           + 'the newest such navigation wins. Emits tab_id and window_id. 0 disables linking.',
@@ -249,6 +259,12 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     } else {
       this.stopListeningForTabFields()
     }
+
+    this.earlyEvents.release({
+      visit: this.visitListener,
+      navigation: this.tabFieldListener,
+      openerAndPage: this.openerAndPageListeners
+    })
   }
 
   /** Discard what is already stored when the configuration now in force disables the module. */
@@ -709,6 +725,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
     this.stopListeningForVisits()
     this.stopListeningForOpenersAndPages()
     this.stopListeningForTabFields()
+    this.earlyEvents.start()
   }
 
   /**

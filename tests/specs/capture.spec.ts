@@ -6,7 +6,7 @@
  * extensions and exposes their service workers, so no window opens.
  */
 
-import { test, expect, chromium, type BrowserContext, type Worker } from '@playwright/test'
+import { test, expect, chromium, type BrowserContext, type Page, type Worker } from '@playwright/test'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -887,6 +887,85 @@ test.describe('rex-browsing — real extension', () => {
     function marker(): string {
       return `${Date.now()}-${Math.random().toString(36).slice(2)}`
     }
+
+    type WorkerWithPlugin = typeof self & {
+      rexBrowsingPlugin: {
+        simulateBeforeConfiguration(): void
+        updateConfiguration(configuration: Record<string, unknown>): void
+      }
+    }
+
+    async function visitWhileConfigurationIsUnread(url: string, section: { enabled: boolean }) {
+      await serviceWorker.evaluate(() => {
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.simulateBeforeConfiguration()
+      })
+      await visit(url)
+      await serviceWorker.evaluate((configuration) => {
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.updateConfiguration({ ...configuration, tab_link_tolerance_ms: 500 })
+      }, section)
+    }
+
+    test('a visit made while a woken worker is still reading configuration is recorded once it arrives', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitWhileConfigurationIsUnread(visitedUrl, { enabled: true })
+
+      await expect.poll(async () => (await drainVisits()).filter((e) => e.url === visitedUrl).length, { timeout: 10_000 }).toBe(1)
+    })
+
+    test('a visit made before configuration arrives is dropped when the module turns out to be disabled', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitWhileConfigurationIsUnread(visitedUrl, { enabled: false })
+      await serviceWorker.evaluate(() => {
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
+      })
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+
+      expect((await drainVisits()).filter((e) => e.url === visitedUrl)).toHaveLength(0)
+    })
+
+    const MORE_EVENTS_THAN_THE_BUFFER_HOLDS = 250
+
+    async function visitThenBurstWhileConfigurationIsUnread(url: string, burst: (page: Page) => Promise<void>) {
+      await serviceWorker.evaluate(() => {
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.simulateBeforeConfiguration()
+      })
+      await visit(url)
+
+      const page = await context.newPage()
+      await page.goto(`${ORIGIN}/plain?burst=${marker()}`)
+      await burst(page)
+      await page.close()
+
+      await serviceWorker.evaluate(() => {
+        ;(self as WorkerWithPlugin).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
+      })
+    }
+
+    test('title changes while configuration is unread do not push the visit out of the held events', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitThenBurstWhileConfigurationIsUnread(visitedUrl, (page) => page.evaluate(async (count) => {
+        for (let index = 0; index < count; index++) {
+          document.title = `title ${index}`
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      }, MORE_EVENTS_THAN_THE_BUFFER_HOLDS))
+
+      await expect.poll(async () => (await drainVisits()).filter((e) => e.url === visitedUrl).length, { timeout: 10_000 }).toBe(1)
+    })
+
+    test('subframe navigations while configuration is unread do not push the visit out of the held events', async () => {
+      const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
+      await visitThenBurstWhileConfigurationIsUnread(visitedUrl, (page) => page.evaluate(async (count) => {
+        for (let index = 0; index < count; index++) {
+          const frame = document.createElement('iframe')
+          frame.src = `/plain?frame=${index}`
+          document.body.append(frame)
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      }, MORE_EVENTS_THAN_THE_BUFFER_HOLDS))
+
+      await expect.poll(async () => (await drainVisits()).filter((e) => e.url === visitedUrl).length, { timeout: 10_000 }).toBe(1)
+    })
 
     test('records an ordinary visit as rex-browsing-visit with the history-visit fields', async () => {
       const visitedUrl = `${ORIGIN}/plain?marker=${marker()}`
