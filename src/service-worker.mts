@@ -387,10 +387,15 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
       return
     }
 
-    chrome.webNavigation.onBeforeNavigate.removeListener(this.tabFieldListener)
-    chrome.webNavigation.onCommitted.removeListener(this.tabFieldListener)
-    chrome.webNavigation.onHistoryStateUpdated.removeListener(this.tabFieldListener)
-    chrome.webNavigation.onReferenceFragmentUpdated.removeListener(this.tabFieldListener)
+    // chrome-types types removeListener on webNavigation events as taking the
+    // addListener function rather than the listener (GoogleChrome/chrome-types#44).
+    // Chrome removes a listener by reference, so the cast changes nothing at run time.
+    const listener = this.tabFieldListener as unknown as never
+
+    chrome.webNavigation.onBeforeNavigate.removeListener(listener)
+    chrome.webNavigation.onCommitted.removeListener(listener)
+    chrome.webNavigation.onHistoryStateUpdated.removeListener(listener)
+    chrome.webNavigation.onReferenceFragmentUpdated.removeListener(listener)
     this.tabFieldListener = null
   }
 

@@ -5,6 +5,7 @@
     "rootDir": "./src",
     "module": "nodenext",
     "target": "esnext",
+    "lib": ["es2024", "dom"],
     "types": ["chrome-types"],
     "sourceMap": true,
     "declaration": true,
