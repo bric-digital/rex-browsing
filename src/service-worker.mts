@@ -29,6 +29,7 @@ import { OpenerStore, TabOpenerTracker, chainRoot, type OpenerRecord } from './t
 import { InternalPageRecorder, PageStore, type PageRecord } from './internal-pages.mjs'
 import { TabLinker, isEmittable } from './tab-link.mjs'
 import { EarlyEventBuffer } from './early-events.mjs'
+import { isMainFrame, isUrlChange, type NavigationDetails, type TabChange } from './browser-events.mjs'
 
 type HistoryCounts = 'last_visit_time' | 'visit_count' | 'typed_count'
 
@@ -152,11 +153,11 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
 
   private openerAndPageListeners: {
     created: (tab: chrome.tabs.Tab) => void;
-    updated: (tabId: number, changeInfo: { url?: string }) => void;
+    updated: (tabId: number, changeInfo: TabChange) => void;
     removed: (tabId: number) => void;
   } | null = null
 
-  private tabFieldListener: ((details: { tabId: number; url: string; frameId: number; timeStamp: number }) => void) | null = null
+  private tabFieldListener: ((details: NavigationDetails) => void) | null = null
 
   constructor() {
     super()
@@ -326,7 +327,7 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
         // onUpdated fires for every status change of every tab; only a committed
         // URL is of interest, for a tab this module is holding or a page Chrome
         // keeps out of history.
-        if (changeInfo.url === undefined) {
+        if (isUrlChange(changeInfo) === false) {
           return
         }
 
@@ -481,8 +482,8 @@ class BrowsingServiceWorkerModule extends REXServiceWorkerModule {
    * A main-frame navigation event of a tab. Held until a visit to the same
    * URL near its time is, or has been, recorded.
    */
-  async captureNavigation(details: { tabId: number, url: string, frameId: number, timeStamp: number }): Promise<boolean> {
-    if (!this.isCaptureEnabled() || this.config.tab_link_tolerance_ms <= 0 || details.frameId !== 0
+  async captureNavigation(details: NavigationDetails): Promise<boolean> {
+    if (!this.isCaptureEnabled() || this.config.tab_link_tolerance_ms <= 0 || isMainFrame(details) === false
       || details.tabId < 0 || !isRecordedScheme(details.url)) {
       return false
     }

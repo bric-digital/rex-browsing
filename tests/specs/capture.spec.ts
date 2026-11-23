@@ -926,8 +926,11 @@ test.describe('rex-browsing — real extension', () => {
     const MORE_EVENTS_THAN_THE_BUFFER_HOLDS = 250
 
     async function visitThenBurstWhileConfigurationIsUnread(url: string, burst: (page: Page) => Promise<void>) {
-      await serviceWorker.evaluate(() => {
+      const stored = await serviceWorker.evaluate(async () => {
+        const { REXConfiguration } = await chrome.storage.local.get('REXConfiguration')
+        await chrome.storage.local.remove('REXConfiguration')
         ;(self as WorkerWithPlugin).rexBrowsingPlugin.simulateBeforeConfiguration()
+        return REXConfiguration
       })
       await visit(url)
 
@@ -936,9 +939,10 @@ test.describe('rex-browsing — real extension', () => {
       await burst(page)
       await page.close()
 
-      await serviceWorker.evaluate(() => {
+      await serviceWorker.evaluate(async (stored) => {
         ;(self as WorkerWithPlugin).rexBrowsingPlugin.updateConfiguration({ enabled: true, tab_link_tolerance_ms: 500 })
-      })
+        await chrome.storage.local.set({ REXConfiguration: stored })
+      }, stored)
     }
 
     test('title changes while configuration is unread do not push the visit out of the held events', async () => {

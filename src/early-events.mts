@@ -1,16 +1,11 @@
-const MAX_HELD_EVENTS = 200
+import { isMainFrame, isUrlChange, type NavigationDetails, type TabChange } from './browser-events.mjs'
 
-export interface NavigationDetails {
-  tabId: number;
-  url: string;
-  frameId: number;
-  timeStamp: number;
-}
+const MAX_HELD_EVENTS = 200
 
 type VisitListener = (item: chrome.history.HistoryItem) => void
 type NavigationListener = (details: NavigationDetails) => void
 type TabCreatedListener = (tab: chrome.tabs.Tab) => void
-type TabUpdatedListener = (tabId: number, changeInfo: { url?: string }) => void
+type TabUpdatedListener = (tabId: number, changeInfo: TabChange) => void
 
 export interface EarlyEventTargets {
   visit: VisitListener | null;
@@ -22,7 +17,7 @@ type HeldEvent =
   | { kind: 'visit'; item: chrome.history.HistoryItem }
   | { kind: 'navigation'; details: NavigationDetails }
   | { kind: 'tabCreated'; tab: chrome.tabs.Tab }
-  | { kind: 'tabUpdated'; tabId: number; changeInfo: { url?: string } }
+  | { kind: 'tabUpdated'; tabId: number; changeInfo: TabChange }
 
 /**
  * Chrome delivers the event that woke a stopped service worker only to listeners
@@ -39,7 +34,7 @@ export class EarlyEventBuffer {
   private navigationRegistered = false
 
   private readonly onNavigation: NavigationListener = (details) => {
-    if (this.listening && details.frameId === 0) {
+    if (this.listening && isMainFrame(details)) {
       this.hold({ kind: 'navigation', details })
     }
   }
@@ -47,7 +42,7 @@ export class EarlyEventBuffer {
   private readonly onTabCreated: TabCreatedListener = (tab) => this.hold({ kind: 'tabCreated', tab })
 
   private readonly onTabUpdated: TabUpdatedListener = (tabId, changeInfo) => {
-    if (changeInfo.url !== undefined) {
+    if (isUrlChange(changeInfo)) {
       this.hold({ kind: 'tabUpdated', tabId, changeInfo })
     }
   }
